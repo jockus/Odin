@@ -6440,7 +6440,8 @@ ExprKind check_call_expr(CheckerContext *c, Operand *operand, Ast *call, Ast *pr
 		    name == "config" || 
 		    name == "load" ||
 		    name == "load_hash" ||
-		    name == "load_or"
+		    name == "load_or" ||
+		    name == "string_hash"
 		) {
 			operand->mode = Addressing_Builtin;
 			operand->builtin_id = BuiltinProc_DIRECTIVE;
@@ -7281,7 +7282,8 @@ ExprKind check_basic_directive_expr(CheckerContext *c, Operand *o, Ast *node, Ty
 		    name == "config" ||
 		    name == "load" ||
 		    name == "load_hash" ||
-		    name == "load_or"
+		    name == "load_or" ||
+		    name == "string_hash"
 		) {
 			error(node, "'#%.*s' must be used as a call", LIT(name));
 			o->type = t_invalid;
