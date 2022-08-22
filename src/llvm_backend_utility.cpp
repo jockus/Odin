@@ -42,6 +42,7 @@ bool lb_is_type_aggregate(Type *t) {
 void lb_emit_unreachable(lbProcedure *p) {
 	LLVMValueRef instr = LLVMGetLastInstruction(p->curr_block->block);
 	if (instr == nullptr || !lb_is_instr_terminating(instr)) {
+		lb_call_intrinsic(p, "llvm.trap", nullptr, 0, nullptr, 0);
 		LLVMBuildUnreachable(p->builder);
 	}
 }
@@ -351,6 +352,10 @@ lbValue lb_emit_try_has_value(lbProcedure *p, lbValue rhs) {
 
 
 lbValue lb_emit_or_else(lbProcedure *p, Ast *arg, Ast *else_expr, TypeAndValue const &tv) {
+	if (arg->state_flags & StateFlag_DirectiveWasFalse) {
+		return lb_build_expr(p, else_expr);
+	}
+
 	lbValue lhs = {};
 	lbValue rhs = {};
 	lb_emit_try_lhs_rhs(p, arg, tv, &lhs, &rhs);
@@ -1285,7 +1290,7 @@ lbValue lb_emit_ptr_offset(lbProcedure *p, lbValue ptr, lbValue index) {
 	LLVMValueRef indices[1] = {index.value};
 	lbValue res = {};
 	res.type = ptr.type;
-	LLVMTypeRef type = lb_type(p->module, type_deref(ptr.type));
+	LLVMTypeRef type = lb_type(p->module, type_deref(res.type, true));
 
 	if (lb_is_const(ptr) && lb_is_const(index)) {
 		res.value = LLVMConstGEP2(type, ptr.value, indices, 1);

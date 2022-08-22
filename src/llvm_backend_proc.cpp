@@ -148,34 +148,30 @@ lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool ignore_body) 
 		lb_add_attribute_to_proc(m, p->value, "noredzone");
 	}
 
-	if (build_context.optimization_level == 0 && build_context.ODIN_DEBUG) {
-		lb_add_attribute_to_proc(m, p->value, "noinline");
-		lb_add_attribute_to_proc(m, p->value, "optnone");
-	} else {
-		switch (p->inlining) {
-		case ProcInlining_inline:
-			lb_add_attribute_to_proc(m, p->value, "alwaysinline");
-			break;
-		case ProcInlining_no_inline:
-			lb_add_attribute_to_proc(m, p->value, "noinline");
-			break;
-		}
 
-		switch (entity->Procedure.optimization_mode) {
-		case ProcedureOptimizationMode_None:
-			lb_add_attribute_to_proc(m, p->value, "optnone");
-			break;
-		case ProcedureOptimizationMode_Minimal:
-			lb_add_attribute_to_proc(m, p->value, "optnone");
-			break;
-		case ProcedureOptimizationMode_Size:
-			lb_add_attribute_to_proc(m, p->value, "optsize");
-			break;
-		case ProcedureOptimizationMode_Speed:
-			// TODO(bill): handle this correctly
-			lb_add_attribute_to_proc(m, p->value, "optsize");
-			break;
-		}
+	switch (p->inlining) {
+	case ProcInlining_inline:
+		lb_add_attribute_to_proc(m, p->value, "alwaysinline");
+		break;
+	case ProcInlining_no_inline:
+		lb_add_attribute_to_proc(m, p->value, "noinline");
+		break;
+	}
+
+	switch (entity->Procedure.optimization_mode) {
+	case ProcedureOptimizationMode_None:
+		lb_add_attribute_to_proc(m, p->value, "optnone");
+		break;
+	case ProcedureOptimizationMode_Minimal:
+		lb_add_attribute_to_proc(m, p->value, "optnone");
+		break;
+	case ProcedureOptimizationMode_Size:
+		lb_add_attribute_to_proc(m, p->value, "optsize");
+		break;
+	case ProcedureOptimizationMode_Speed:
+		// TODO(bill): handle this correctly
+		lb_add_attribute_to_proc(m, p->value, "optsize");
+		break;
 	}
 
 	if (!entity->Procedure.target_feature_disabled &&
@@ -2071,15 +2067,7 @@ lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValue const &tv,
 			lbValue ptr = lb_build_expr(p, ce->args[0]);
 			lbValue len = lb_build_expr(p, ce->args[1]);
 			len = lb_emit_conv(p, len, t_int);
-
-			LLVMValueRef indices[1] = {
-				len.value,
-			};
-
-			lbValue res = {};
-			res.type = tv.type;
-			res.value = LLVMBuildGEP2(p->builder, lb_type(p->module, type_deref(tv.type)), ptr.value, indices, gb_count_of(indices), "");
-			return res;
+			return lb_emit_ptr_offset(p, ptr, len);
 		}
 	case BuiltinProc_ptr_sub:
 		{
@@ -2757,6 +2745,55 @@ lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValue const &tv,
 			res.value = LLVMBuildCall2(p->builder, func_type, the_asm, args, gb_count_of(args), "");
 			return res;
 		}
+
+	case BuiltinProc_valgrind_client_request:
+		{
+			lbValue args[7] = {};
+			for (isize i = 0; i < 7; i++) {
+				args[i] = lb_emit_conv(p, lb_build_expr(p, ce->args[i]), t_uintptr);
+			}
+			if (!build_context.ODIN_VALGRIND_SUPPORT) {
+				return args[0];
+			}
+			lbValue array = lb_generate_local_array(p, t_uintptr, 6, false);
+			for (isize i = 0; i < 6; i++) {
+				lbValue gep = lb_emit_array_epi(p, array, i);
+				lb_emit_store(p, gep, args[i+1]);
+			}
+
+			switch (build_context.metrics.arch) {
+			case TargetArch_amd64:
+				{
+					Type *param_types[2] = {};
+					param_types[0] = t_uintptr;
+					param_types[1] = array.type;
+
+					Type *type = alloc_type_proc_from_types(param_types, gb_count_of(param_types), t_uintptr, false, ProcCC_None);
+					LLVMTypeRef func_type = lb_get_procedure_raw_type(p->module, type);
+					LLVMValueRef the_asm = llvm_get_inline_asm(
+						func_type,
+						str_lit("rolq $3, %rdi; rolq $13, %rdi\n rolq $61, %rdi; rolq $51, %rdi\n xchgq %rbx, %rbx"),
+						str_lit("={rdx},{rdx},{rax},cc,memory"),
+						true
+					);
+
+					LLVMValueRef asm_args[2] = {};
+					asm_args[0] = args[0].value;
+					asm_args[1] = array.value;
+
+					lbValue res = {};
+					res.type = t_uintptr;
+					res.value = LLVMBuildCall2(p->builder, func_type, the_asm, asm_args, gb_count_of(asm_args), "");
+					return res;
+				}
+				break;
+			default:
+				GB_PANIC("Unsupported architecture: %.*s", LIT(target_arch_names[build_context.metrics.arch]));
+				break;
+			}
+
+		}
+
 	}
 
 	GB_PANIC("Unhandled built-in procedure %.*s", LIT(builtin_procs[id].name));

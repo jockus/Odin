@@ -1037,6 +1037,9 @@ void init_universal(void) {
 	add_global_bool_constant("ODIN_FOREIGN_ERROR_PROCEDURES", bc->ODIN_FOREIGN_ERROR_PROCEDURES);
 	add_global_bool_constant("ODIN_DISALLOW_RTTI",            bc->disallow_rtti);
 
+	add_global_bool_constant("ODIN_VALGRIND_SUPPORT",         bc->ODIN_VALGRIND_SUPPORT);
+
+
 
 // Builtin Procedures
 	for (isize i = 0; i < gb_count_of(builtin_procs); i++) {
@@ -1170,6 +1173,8 @@ void init_checker_info(CheckerInfo *i) {
 
 	mutex_init(&i->objc_types_mutex);
 	map_init(&i->objc_msgSend_types, a);
+	mutex_init(&i->load_file_mutex);
+	string_map_init(&i->load_file_cache, a);
 }
 
 void destroy_checker_info(CheckerInfo *i) {
@@ -1205,6 +1210,8 @@ void destroy_checker_info(CheckerInfo *i) {
 
 	mutex_destroy(&i->objc_types_mutex);
 	map_destroy(&i->objc_msgSend_types);
+	mutex_init(&i->load_file_mutex);
+	string_map_destroy(&i->load_file_cache);
 }
 
 CheckerContext make_checker_context(Checker *c) {
