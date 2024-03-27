@@ -1,13 +1,11 @@
 package miniaudio
 
-import c "core:c/libc"
+import "core:c"
 
 when ODIN_OS == .Windows {
 	foreign import lib "lib/miniaudio.lib"
-} else when ODIN_OS == .Linux {
-	foreign import lib "lib/miniaudio.a"
 } else {
-	foreign import lib "system:miniaudio"
+	foreign import lib "lib/miniaudio.a"
 }
 
 /*

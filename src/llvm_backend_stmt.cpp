@@ -748,7 +748,7 @@ gb_internal void lb_build_range_enum(lbProcedure *p, Type *enum_type, Type *val_
 	i64 enum_count = t->Enum.fields.count;
 	lbValue max_count = lb_const_int(m, t_int, enum_count);
 
-	lbValue ti          = lb_type_info(m, t);
+	lbValue ti          = lb_type_info(p, t);
 	lbValue variant     = lb_emit_struct_ep(p, ti, 4);
 	lbValue eti_ptr     = lb_emit_conv(p, variant, t_type_info_enum_ptr);
 	lbValue values      = lb_emit_load(p, lb_emit_struct_ep(p, eti_ptr, 2));
@@ -1454,7 +1454,7 @@ gb_internal void lb_build_switch_stmt(lbProcedure *p, AstSwitchStmt *ss, Scope *
 	lb_close_scope(p, lbDeferExit_Default, done);
 }
 
-gb_internal void lb_store_type_case_implicit(lbProcedure *p, Ast *clause, lbValue value) {
+gb_internal void lb_store_type_case_implicit(lbProcedure *p, Ast *clause, lbValue value, bool is_default_case) {
 	Entity *e = implicit_entity_of_node(clause);
 	GB_ASSERT(e != nullptr);
 	if (e->flags & EntityFlag_Value) {
@@ -1463,8 +1463,9 @@ gb_internal void lb_store_type_case_implicit(lbProcedure *p, Ast *clause, lbValu
 		lbAddr x = lb_add_local(p, e->type, e, false);
 		lb_addr_store(p, x, value);
 	} else {
-		// by reference
-		GB_ASSERT(are_types_identical(e->type, type_deref(value.type)));
+		if (!is_default_case) {
+			GB_ASSERT_MSG(are_types_identical(e->type, type_deref(value.type)), "%s %s", type_to_string(e->type), type_to_string(value.type));
+		}
 		lb_add_entity(p->module, e, value);
 	}
 }
@@ -1622,7 +1623,7 @@ gb_internal void lb_build_type_switch_stmt(lbProcedure *p, AstTypeSwitchStmt *ss
 		lb_open_scope(p, cc->scope);
 		if (cc->list.count == 0) {
 			lb_start_block(p, default_block);
-			lb_store_type_case_implicit(p, clause, parent_value);
+			lb_store_type_case_implicit(p, clause, parent_value, true);
 			lb_type_case_body(p, ss->label, clause, p->curr_block, done);
 			continue;
 		}
@@ -1688,7 +1689,7 @@ gb_internal void lb_build_type_switch_stmt(lbProcedure *p, AstTypeSwitchStmt *ss
 			lb_add_entity(p->module, case_entity, ptr);
 			lb_add_debug_local_variable(p, ptr.value, case_entity->type, case_entity->token);
 		} else {
-			lb_store_type_case_implicit(p, clause, parent_value);
+			lb_store_type_case_implicit(p, clause, parent_value, false);
 		}
 
 		lb_type_case_body(p, ss->label, clause, body, done);
@@ -1843,7 +1844,11 @@ gb_internal void lb_build_return_stmt_internal(lbProcedure *p, lbValue res) {
 
 		lb_emit_defer_stmts(p, lbDeferExit_Return, nullptr);
 
-		LLVMBuildRetVoid(p->builder);
+		// Check for terminator in the defer stmts
+		LLVMValueRef instr = LLVMGetLastInstruction(p->curr_block->block);
+		if (!lb_is_instr_terminating(instr)) {
+			LLVMBuildRetVoid(p->builder);
+		}
 	} else {
 		LLVMValueRef ret_val = res.value;
 		LLVMTypeRef ret_type = p->abi_function_type->ret.type;
@@ -1868,7 +1873,12 @@ gb_internal void lb_build_return_stmt_internal(lbProcedure *p, lbValue res) {
 		}
 
 		lb_emit_defer_stmts(p, lbDeferExit_Return, nullptr);
-		LLVMBuildRet(p->builder, ret_val);
+
+		// Check for terminator in the defer stmts
+		LLVMValueRef instr = LLVMGetLastInstruction(p->curr_block->block);
+		if (!lb_is_instr_terminating(instr)) {
+			LLVMBuildRet(p->builder, ret_val);
+		}
 	}
 }
 gb_internal void lb_build_return_stmt(lbProcedure *p, Slice<Ast *> const &return_results) {
@@ -1887,8 +1897,12 @@ gb_internal void lb_build_return_stmt(lbProcedure *p, Slice<Ast *> const &return
 		// No return values
 
 		lb_emit_defer_stmts(p, lbDeferExit_Return, nullptr);
-
-		LLVMBuildRetVoid(p->builder);
+		
+		// Check for terminator in the defer stmts
+		LLVMValueRef instr = LLVMGetLastInstruction(p->curr_block->block);
+		if (!lb_is_instr_terminating(instr)) {
+			LLVMBuildRetVoid(p->builder);
+		}
 		return;
 	} else if (return_count == 1) {
 		Entity *e = tuple->variables[0];

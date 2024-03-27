@@ -1,5 +1,7 @@
 package libc
 
+import "core:io"
+
 when ODIN_OS == .Windows {
 	foreign import libc {
 		"system:libucrt.lib",
@@ -161,6 +163,36 @@ when ODIN_OS == .Darwin {
 	}
 }
 
+when ODIN_OS == .Haiku {
+	fpos_t :: distinct i64
+	
+	_IOFBF        :: 0
+	_IOLBF        :: 1
+	_IONBF        :: 2
+
+	BUFSIZ        :: 8192
+
+	EOF           :: int(-1)
+
+	FOPEN_MAX     :: 128
+
+	FILENAME_MAX  :: 256
+
+	L_tmpnam      :: 512
+
+	SEEK_SET      :: 0
+	SEEK_CUR      :: 1
+	SEEK_END      :: 2
+
+	TMP_MAX       :: 32768
+
+	foreign libc {
+		stderr: ^FILE
+		stdin:  ^FILE
+		stdout: ^FILE
+	}
+}
+
 @(default_calling_convention="c")
 foreign libc {
 	// 7.21.4 Operations on files
@@ -217,4 +249,103 @@ foreign libc {
 	feof      :: proc(stream: ^FILE) -> int ---
 	ferror    :: proc(stream: ^FILE) -> int ---
 	perror    :: proc(s: cstring) ---
+}
+
+to_stream :: proc(file: ^FILE) -> io.Stream {
+	stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
+		unknown_or_eof :: proc(f: ^FILE) -> io.Error {
+			switch {
+			case ferror(f) != 0:
+				return .Unknown
+			case feof(f) != 0:
+				return .EOF
+			case:
+				return nil
+			}
+		}
+
+		file := (^FILE)(stream_data)
+		switch mode {
+		case .Close:
+			if fclose(file) != 0 {
+				return 0, unknown_or_eof(file)
+			}
+
+		case .Flush:
+			if fflush(file) != 0 {
+				return 0, unknown_or_eof(file)
+			}
+
+		case .Read:
+			n = i64(fread(raw_data(p), size_of(byte), len(p), file))
+			if n == 0 { err = unknown_or_eof(file) }
+
+		case .Read_At:
+			curr := ftell(file)
+			if curr == -1 {
+				return 0, unknown_or_eof(file)
+			}
+
+			if fseek(file, long(offset), SEEK_SET) != 0 {
+				return 0, unknown_or_eof(file)
+			}
+
+			defer fseek(file, long(curr), SEEK_SET)
+
+			n = i64(fread(raw_data(p), size_of(byte), len(p), file))
+			if n == 0 { err = unknown_or_eof(file) }
+		
+		case .Write:
+			n = i64(fwrite(raw_data(p), size_of(byte), len(p), file))
+			if n == 0 { err = unknown_or_eof(file) }
+
+		case .Write_At:
+			curr := ftell(file)
+			if curr == -1 {
+				return 0, unknown_or_eof(file)
+			}
+
+			if fseek(file, long(offset), SEEK_SET) != 0 {
+				return 0, unknown_or_eof(file)
+			}
+
+			defer fseek(file, long(curr), SEEK_SET)
+
+			n = i64(fwrite(raw_data(p), size_of(byte), len(p), file))
+			if n == 0 { err = unknown_or_eof(file) }
+
+		case .Seek:
+			if fseek(file, long(offset), int(whence)) != 0 {
+				return 0, unknown_or_eof(file)
+			}
+		
+		case .Size:
+			curr := ftell(file)
+			if curr == -1 {
+				return 0, unknown_or_eof(file)
+			}
+			defer fseek(file, curr, SEEK_SET)
+
+			if fseek(file, 0, SEEK_END) != 0 {
+				return 0, unknown_or_eof(file)
+			}
+
+			n = i64(ftell(file))
+			if n == -1 {
+				return 0, unknown_or_eof(file)
+			}
+
+		case .Destroy:
+			return 0, .Empty
+		
+		case .Query:
+			return io.query_utility({ .Close, .Flush, .Read, .Read_At, .Write, .Write_At, .Seek, .Size })
+		}
+		return
+	}
+
+	return {
+		data      = file,
+		procedure = stream_proc,
+	}
 }

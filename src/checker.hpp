@@ -103,6 +103,12 @@ struct DeferredProcedure {
 };
 
 
+enum InstrumentationFlag : i32 {
+	Instrumentation_Enabled  = -1,
+	Instrumentation_Default  = 0,
+	Instrumentation_Disabled = +1,
+};
+
 struct AttributeContext {
 	String  link_name;
 	String  link_prefix;
@@ -113,19 +119,23 @@ struct AttributeContext {
 	String  deprecated_message;
 	String  warning_message;
 	DeferredProcedure deferred_procedure;
-	bool    is_export           : 1;
-	bool    is_static           : 1;
-	bool    require_results     : 1;
-	bool    require_declaration : 1;
-	bool    has_disabled_proc   : 1;
-	bool    disabled_proc       : 1;
-	bool    test                : 1;
-	bool    init                : 1;
-	bool    fini                : 1;
-	bool    set_cold            : 1;
+	bool    is_export             : 1;
+	bool    is_static             : 1;
+	bool    require_results       : 1;
+	bool    require_declaration   : 1;
+	bool    has_disabled_proc     : 1;
+	bool    disabled_proc         : 1;
+	bool    test                  : 1;
+	bool    init                  : 1;
+	bool    fini                  : 1;
+	bool    set_cold              : 1;
+	bool    entry_point_only      : 1;
+	bool    instrumentation_enter : 1;
+	bool    instrumentation_exit  : 1;
 	u32 optimization_mode; // ProcedureOptimizationMode
 	i64 foreign_import_priority_index;
 	String extra_linker_flags;
+	InstrumentationFlag no_instrumentation;
 
 	String  objc_class;
 	String  objc_name;
@@ -330,6 +340,19 @@ struct LoadFileCache {
 	StringMap<u64> hashes;
 };
 
+
+struct LoadDirectoryFile {
+	String file_name;
+	String data;
+};
+
+struct LoadDirectoryCache {
+	String                 path;
+	gbFileError            file_error;
+	Array<LoadFileCache *> files;
+};
+
+
 struct GenProcsData {
 	Array<Entity *> procs;
 	RwMutex         mutex;
@@ -337,7 +360,7 @@ struct GenProcsData {
 
 struct GenTypesData {
 	Array<Entity *> types;
-	RwMutex         mutex;
+	RecursiveMutex  mutex;
 };
 
 // CheckerInfo stores all the symbol information for a type-checked program
@@ -377,8 +400,8 @@ struct CheckerInfo {
 
 	RecursiveMutex lazy_mutex; // Mutex required for lazy type checking of specific files
 
-	RwMutex       gen_types_mutex;
-	PtrMap<Type *, GenTypesData > gen_types;
+	BlockingMutex                  gen_types_mutex;
+	PtrMap<Type *, GenTypesData *> gen_types;
 
 	BlockingMutex type_info_mutex; // NOT recursive
 	Array<Type *> type_info_types;
@@ -402,6 +425,15 @@ struct CheckerInfo {
 
 	BlockingMutex all_procedures_mutex;
 	Array<ProcInfo *> all_procedures;
+
+	BlockingMutex instrumentation_mutex;
+	Entity *instrumentation_enter_entity;
+	Entity *instrumentation_exit_entity;
+
+
+	BlockingMutex                       load_directory_mutex;
+	StringMap<LoadDirectoryCache *>     load_directory_cache;
+	PtrMap<Ast *, LoadDirectoryCache *> load_directory_map; // Key: Ast_CallExpr *
 };
 
 struct CheckerContext {
@@ -419,6 +451,7 @@ struct CheckerContext {
 	u32            state_flags;
 	bool           in_defer;
 	Type *         type_hint;
+	Ast *          type_hint_expr;
 
 	String         proc_name;
 	DeclInfo *     curr_proc_decl;
@@ -443,6 +476,7 @@ struct CheckerContext {
 	bool       hide_polymorphic_errors;
 	bool       in_polymorphic_specialization;
 	bool       allow_arrow_right_selector_expr;
+	u8         bit_field_bit_size;
 	Scope *    polymorphic_scope;
 
 	Ast *assignment_lhs_hint;
@@ -466,6 +500,7 @@ struct Checker {
 
 
 	MPSCQueue<UntypedExprInfo> global_untyped_queue;
+	MPSCQueue<Type *> soa_types_to_complete;
 };
 
 
@@ -526,3 +561,6 @@ gb_internal void init_core_context(Checker *c);
 gb_internal void init_mem_allocator(Checker *c);
 
 gb_internal void add_untyped_expressions(CheckerInfo *cinfo, UntypedExprInfoMap *untyped);
+
+
+gb_internal GenTypesData *ensure_polymorphic_record_entity_has_gen_types(CheckerContext *ctx, Type *original_type);

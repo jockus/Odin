@@ -4,7 +4,7 @@ import "core:strings"
 import "core:testing"
 import "core:fmt"
 import "core:os"
-import "core:runtime"
+import "base:runtime"
 import "core:mem"
 
 TEST_count := 0
@@ -65,6 +65,18 @@ test_index_any_small_string_found :: proc(t: ^testing.T) {
 test_index_any_larger_string_found :: proc(t: ^testing.T) {
 	index := strings.index_any("aaaaaaaa:aaaaaaaa", "/:\"")
 	expect(t, index == 8, "index_any should be 8")
+}
+
+@test
+test_last_index_any_small_string_found :: proc(t: ^testing.T) {
+	index := strings.last_index_any(".", "/:.\"")
+	expect(t, index == 0, "last_index_any should be 0")
+}
+
+@test
+test_last_index_any_small_string_not_found :: proc(t: ^testing.T) {
+	index := strings.last_index_any(".", "/:\"")
+	expect(t, index == -1, "last_index_any should be -1")
 }
 
 Cut_Test :: struct {

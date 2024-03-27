@@ -21,8 +21,8 @@
 #include "llvm_backend_stmt.cpp"
 #include "llvm_backend_proc.cpp"
 
-char *get_default_microarchitecture() {
-	char * default_march = "generic";
+String get_default_microarchitecture() {
+	String default_march = str_lit("generic");
 	if (build_context.metrics.arch == TargetArch_amd64) {
 		// NOTE(bill): x86-64-v2 is more than enough for everyone
 		//
@@ -32,9 +32,9 @@ char *get_default_microarchitecture() {
 		// x86-64-v4: AVX512F, AVX512BW, AVX512CD, AVX512DQ, AVX512VL
 		if (ODIN_LLVM_MINIMUM_VERSION_12) {
 			if (build_context.metrics.os == TargetOs_freestanding) {
-				default_march = "x86-64";
+				default_march = str_lit("x86-64");
 			} else {
-				default_march = "x86-64-v2";
+				default_march = str_lit("x86-64-v2");
 			}
 		}
 	}
@@ -334,7 +334,7 @@ gb_internal void lb_add_callsite_force_inline(lbProcedure *p, lbValue ret_value)
 
 gb_internal lbValue lb_hasher_proc_for_type(lbModule *m, Type *type) {
 	type = core_type(type);
-	GB_ASSERT_MSG(is_type_valid_for_keys(type), "%s", type_to_string(type));
+	GB_ASSERT_MSG(is_type_comparable(type), "%s", type_to_string(type));
 
 	Type *pt = alloc_type_pointer(type);
 
@@ -1053,36 +1053,6 @@ struct lbGlobalVariable {
 	bool is_initialized;
 };
 
-gb_internal lbProcedure *lb_create_startup_type_info(lbModule *m) {
-	if (build_context.no_rtti) {
-		return nullptr;
-	}
-	Type *proc_type = alloc_type_proc(nullptr, nullptr, 0, nullptr, 0, false, ProcCC_CDecl);
-
-	lbProcedure *p = lb_create_dummy_procedure(m, str_lit(LB_STARTUP_TYPE_INFO_PROC_NAME), proc_type);
-	p->is_startup = true;
-	LLVMSetLinkage(p->value, LLVMInternalLinkage);
-
-	lb_add_attribute_to_proc(m, p->value, "nounwind");
-	if (!LB_USE_GIANT_PACKED_STRUCT) {
-		lb_add_attribute_to_proc(m, p->value, "optnone");
-		lb_add_attribute_to_proc(m, p->value, "noinline");
-	}
-
-	lb_begin_procedure_body(p);
-
-	lb_setup_type_info_data(p);
-
-	lb_end_procedure_body(p);
-
-	if (!m->debug_builder && LLVMVerifyFunction(p->value, LLVMReturnStatusAction)) {
-		gb_printf_err("LLVM CODE GEN FAILED FOR PROCEDURE: %s\n", "main");
-		LLVMDumpValue(p->value);
-		gb_printf_err("\n\n\n\n");
-		LLVMVerifyFunction(p->value, LLVMAbortProcessAction);
-	}
-	return p;
-}
 
 gb_internal lbProcedure *lb_create_objc_names(lbModule *main_module) {
 	if (build_context.metrics.os != TargetOs_darwin) {
@@ -1124,7 +1094,7 @@ gb_internal void lb_finalize_objc_names(lbProcedure *p) {
 	lb_end_procedure_body(p);
 }
 
-gb_internal lbProcedure *lb_create_startup_runtime(lbModule *main_module, lbProcedure *startup_type_info, lbProcedure *objc_names, Array<lbGlobalVariable> &global_variables) { // Startup Runtime
+gb_internal lbProcedure *lb_create_startup_runtime(lbModule *main_module, lbProcedure *objc_names, Array<lbGlobalVariable> &global_variables) { // Startup Runtime
 	Type *proc_type = alloc_type_proc(nullptr, nullptr, 0, nullptr, 0, false, ProcCC_Odin);
 
 	lbProcedure *p = lb_create_dummy_procedure(main_module, str_lit(LB_STARTUP_RUNTIME_PROC_NAME), proc_type);
@@ -1134,9 +1104,7 @@ gb_internal lbProcedure *lb_create_startup_runtime(lbModule *main_module, lbProc
 
 	lb_begin_procedure_body(p);
 
-	if (startup_type_info) {
-		LLVMBuildCall2(p->builder, lb_type_internal_for_procedures_raw(main_module, startup_type_info->type), startup_type_info->value, nullptr, 0, "");
-	}
+	lb_setup_type_info_data(main_module);
 
 	if (objc_names) {
 		LLVMBuildCall2(p->builder, lb_type_internal_for_procedures_raw(main_module, objc_names->type), objc_names->value, nullptr, 0, "");
@@ -1196,7 +1164,7 @@ gb_internal lbProcedure *lb_create_startup_runtime(lbModule *main_module, lbProc
 				lbValue data = lb_emit_struct_ep(p, var.var, 0);
 				lbValue ti   = lb_emit_struct_ep(p, var.var, 1);
 				lb_emit_store(p, data, lb_emit_conv(p, gp, t_rawptr));
-				lb_emit_store(p, ti,   lb_type_info(main_module, var_type));
+				lb_emit_store(p, ti,   lb_type_info(p, var_type));
 			} else {
 				LLVMTypeRef vt = llvm_addr_type(p->module, var.var);
 				lbValue src0 = lb_emit_conv(p, var.init, t);
@@ -1382,7 +1350,7 @@ gb_internal WORKER_TASK_PROC(lb_llvm_emit_worker_proc) {
 
 	if (LLVMTargetMachineEmitToFile(wd->target_machine, wd->m->mod, cast(char *)wd->filepath_obj.text, wd->code_gen_file_type, &llvm_error)) {
 		gb_printf_err("LLVM Error: %s\n", llvm_error);
-		gb_exit(1);
+		exit_with_errors();
 	}
 	debugf("Generated File: %.*s\n", LIT(wd->filepath_obj));
 	return 0;
@@ -1421,7 +1389,6 @@ gb_internal WORKER_TASK_PROC(lb_llvm_function_pass_per_module) {
 	}
 
 	if (m == &m->gen->default_module) {
-		lb_llvm_function_pass_per_function_internal(m, m->gen->startup_type_info);
 		lb_llvm_function_pass_per_function_internal(m, m->gen->startup_runtime);
 		lb_llvm_function_pass_per_function_internal(m, m->gen->cleanup_runtime);
 		lb_llvm_function_pass_per_function_internal(m, m->gen->objc_names);
@@ -1496,8 +1463,6 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 #if LB_USE_NEW_PASS_SYSTEM
 	auto passes = array_make<char const *>(heap_allocator(), 0, 64);
 	defer (array_free(&passes));
-
-
 
 	LLVMPassBuilderOptionsRef pb_options = LLVMCreatePassBuilderOptions();
 	defer (LLVMDisposePassBuilderOptions(pb_options));
@@ -1954,7 +1919,7 @@ verify
 				gb_printf_err("LLVM Error: %s\n", llvm_error);
 			}
 		}
-		gb_exit(1);
+		exit_with_errors();
 		return 1;
 	}
 #endif
@@ -2139,11 +2104,11 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_verification_worker_proc) {
 			String filepath_ll = lb_filepath_ll_for_module(m);
 			if (LLVMPrintModuleToFile(m->mod, cast(char const *)filepath_ll.text, &llvm_error)) {
 				gb_printf_err("LLVM Error: %s\n", llvm_error);
-				gb_exit(1);
+				exit_with_errors();
 				return false;
 			}
 		}
-		gb_exit(1);
+		exit_with_errors();
 		return 1;
 	}
 	return 0;
@@ -2228,7 +2193,7 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 
 			if (LLVMTargetMachineEmitToFile(m->target_machine, m->mod, cast(char *)filepath_obj.text, code_gen_file_type, &llvm_error)) {
 				gb_printf_err("LLVM Error: %s\n", llvm_error);
-				gb_exit(1);
+				exit_with_errors();
 				return false;
 			}
 			debugf("Generated File: %.*s\n", LIT(filepath_obj));
@@ -2428,7 +2393,7 @@ gb_internal void lb_generate_procedure(lbModule *m, lbProcedure *p) {
 			gb_printf_err("LLVM Error: %s\n", llvm_error);
 		}
 		LLVMVerifyFunction(p->value, LLVMPrintMessageAction);
-		gb_exit(1);
+		exit_with_errors();
 	}
 }
 
@@ -2505,20 +2470,20 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	LLVMCodeModel code_mode = LLVMCodeModelDefault;
 	if (is_arch_wasm()) {
 		code_mode = LLVMCodeModelJITDefault;
-	} else if (build_context.metrics.os == TargetOs_freestanding) {
+	} else if (is_arch_x86() && build_context.metrics.os == TargetOs_freestanding) {
 		code_mode = LLVMCodeModelKernel;
 	}
 
-	char const *host_cpu_name = LLVMGetHostCPUName();
-	char const *llvm_cpu = get_default_microarchitecture();
+	String      host_cpu_name = copy_string(permanent_allocator(), make_string_c(LLVMGetHostCPUName()));
+	String      llvm_cpu      = get_default_microarchitecture();
 	char const *llvm_features = "";
 	if (build_context.microarch.len != 0) {
 		if (build_context.microarch == "native") {
 			llvm_cpu = host_cpu_name;
 		} else {
-			llvm_cpu = alloc_cstring(permanent_allocator(), build_context.microarch);
+			llvm_cpu = copy_string(permanent_allocator(), build_context.microarch);
 		}
-		if (gb_strcmp(llvm_cpu, host_cpu_name) == 0) {
+		if (llvm_cpu == host_cpu_name) {
 			llvm_features = LLVMGetHostCPUFeatures();
 		}
 	}
@@ -2531,7 +2496,46 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	*/
 
 	if (build_context.target_features_set.entries.count != 0) {
-		llvm_features = target_features_set_to_cstring(permanent_allocator(), false);
+		// Prefix all of the features with a `+`, because we are
+		// enabling additional features.
+		char const *additional_features = target_features_set_to_cstring(permanent_allocator(), false, true);
+
+		String f_string = make_string_c(llvm_features);
+		String a_string = make_string_c(additional_features);
+		isize f_len = f_string.len;
+
+		if (f_len == 0) {
+			// The common case is that llvm_features is empty, so
+			// the target_features_set additions can be used as is.
+			llvm_features = additional_features;
+		} else {
+			// The user probably specified `-microarch:native`, so
+			// llvm_features is populated by LLVM's idea of what
+			// the host CPU supports.
+			//
+			// As far as I can tell, (which is barely better than
+			// wild guessing), a bitset is formed by parsing the
+			// string left to right.
+			//
+			// So, llvm_features + ',' + additonal_features, will
+			// makes the target_features_set override llvm_features.
+
+			char *tmp = gb_alloc_array(permanent_allocator(), char, f_len + 1 + a_string.len + 1);
+			isize len = 0;
+
+			// tmp = f_string
+			gb_memmove(tmp, f_string.text, f_string.len);
+			len += f_string.len;
+			// tmp += ','
+			tmp[len++] = ',';
+			// tmp += a_string
+			gb_memmove(tmp + len, a_string.text, a_string.len);
+			len += a_string.len;
+			// tmp += NUL
+			tmp[len++] = 0;
+
+			llvm_features = tmp;
+		}
 	}
 
 	// GB_ASSERT_MSG(LLVMTargetHasAsmBackend(target));
@@ -2560,8 +2564,8 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 
 	switch (build_context.reloc_mode) {
 	case RelocMode_Default:
-		if (build_context.metrics.os == TargetOs_openbsd) {
-			// Always use PIC for OpenBSD: it defaults to PIE
+		if (build_context.metrics.os == TargetOs_openbsd || build_context.metrics.os == TargetOs_haiku) {
+			// Always use PIC for OpenBSD and Haiku: they default to PIE
 			reloc_mode = LLVMRelocPIC;
 		}
 		break;
@@ -2578,7 +2582,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 
 	for (auto const &entry : gen->modules) {
 		LLVMTargetMachineRef target_machine = LLVMCreateTargetMachine(
-			target, target_triple, llvm_cpu,
+			target, target_triple, (const char *)llvm_cpu.text,
 			llvm_features,
 			code_gen_level,
 			reloc_mode,
@@ -2649,17 +2653,19 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 
 		{ // Add type info data
 			isize max_type_info_count = info->minimum_dependency_type_info_set.count+1;
-			Type *t = alloc_type_array(t_type_info, max_type_info_count);
+			Type *t = alloc_type_array(t_type_info_ptr, max_type_info_count);
 
 			// IMPORTANT NOTE(bill): As LLVM does not have a union type, an array of unions cannot be initialized
 			// at compile time without cheating in some way. This means to emulate an array of unions is to use
 			// a giant packed struct of "corrected" data types.
 
-			LLVMTypeRef internal_llvm_type = lb_setup_type_info_data_internal_type(m, max_type_info_count);
+			LLVMTypeRef internal_llvm_type = lb_type(m, t);
 
 			LLVMValueRef g = LLVMAddGlobal(m->mod, internal_llvm_type, LB_TYPE_INFO_DATA_NAME);
 			LLVMSetInitializer(g, LLVMConstNull(internal_llvm_type));
 			LLVMSetLinkage(g, USE_SEPARATE_MODULES ? LLVMExternalLinkage : LLVMInternalLinkage);
+			LLVMSetUnnamedAddress(g, LLVMGlobalUnnamedAddr);
+			LLVMSetGlobalConstant(g, /*true*/false);
 
 			lbValue value = {};
 			value.value = g;
@@ -2668,15 +2674,11 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 			lb_global_type_info_data_entity = alloc_entity_variable(nullptr, make_token_ident(LB_TYPE_INFO_DATA_NAME), t, EntityState_Resolved);
 			lb_add_entity(m, lb_global_type_info_data_entity, value);
 
-			if (LB_USE_GIANT_PACKED_STRUCT) {
-				LLVMSetLinkage(g, LLVMPrivateLinkage);
-				LLVMSetUnnamedAddress(g, LLVMGlobalUnnamedAddr);
-				LLVMSetGlobalConstant(g, /*true*/false);
-			}
 		}
 		{ // Type info member buffer
 			// NOTE(bill): Removes need for heap allocation by making it global memory
 			isize count = 0;
+			isize offsets_extra = 0;
 
 			for (Type *t : m->info->type_info_types) {
 				isize index = lb_type_info_index(m->info, t, false);
@@ -2694,67 +2696,28 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 				case Type_Tuple:
 					count += t->Tuple.variables.count;
 					break;
+				case Type_BitField:
+					count += t->BitField.fields.count;
+					// Twice is needed for the bit_offsets
+					offsets_extra += t->BitField.fields.count;
+					break;
 				}
 			}
 
-			{
-				char const *name = LB_TYPE_INFO_TYPES_NAME;
-				Type *t = alloc_type_array(t_type_info_ptr, count);
+			auto const global_type_info_make = [](lbModule *m, char const *name, Type *elem_type, i64 count) -> lbAddr {
+				Type *t = alloc_type_array(elem_type, count);
 				LLVMValueRef g = LLVMAddGlobal(m->mod, lb_type(m, t), name);
 				LLVMSetInitializer(g, LLVMConstNull(lb_type(m, t)));
 				LLVMSetLinkage(g, LLVMInternalLinkage);
-				if (LB_USE_GIANT_PACKED_STRUCT) {
-					lb_make_global_private_const(g);
-				}
-				lb_global_type_info_member_types = lb_addr({g, alloc_type_pointer(t)});
+				lb_make_global_private_const(g);
+				return lb_addr({g, alloc_type_pointer(t)});
+			};
 
-			}
-			{
-				char const *name = LB_TYPE_INFO_NAMES_NAME;
-				Type *t = alloc_type_array(t_string, count);
-				LLVMValueRef g = LLVMAddGlobal(m->mod, lb_type(m, t), name);
-				LLVMSetInitializer(g, LLVMConstNull(lb_type(m, t)));
-				LLVMSetLinkage(g, LLVMInternalLinkage);
-				if (LB_USE_GIANT_PACKED_STRUCT) {
-					lb_make_global_private_const(g);
-				}
-				lb_global_type_info_member_names = lb_addr({g, alloc_type_pointer(t)});
-			}
-			{
-				char const *name = LB_TYPE_INFO_OFFSETS_NAME;
-				Type *t = alloc_type_array(t_uintptr, count);
-				LLVMValueRef g = LLVMAddGlobal(m->mod, lb_type(m, t), name);
-				LLVMSetInitializer(g, LLVMConstNull(lb_type(m, t)));
-				LLVMSetLinkage(g, LLVMInternalLinkage);
-				if (LB_USE_GIANT_PACKED_STRUCT) {
-					lb_make_global_private_const(g);
-				}
-				lb_global_type_info_member_offsets = lb_addr({g, alloc_type_pointer(t)});
-			}
-
-			{
-				char const *name = LB_TYPE_INFO_USINGS_NAME;
-				Type *t = alloc_type_array(t_bool, count);
-				LLVMValueRef g = LLVMAddGlobal(m->mod, lb_type(m, t), name);
-				LLVMSetInitializer(g, LLVMConstNull(lb_type(m, t)));
-				LLVMSetLinkage(g, LLVMInternalLinkage);
-				if (LB_USE_GIANT_PACKED_STRUCT) {
-					lb_make_global_private_const(g);
-				}
-				lb_global_type_info_member_usings = lb_addr({g, alloc_type_pointer(t)});
-			}
-
-			{
-				char const *name = LB_TYPE_INFO_TAGS_NAME;
-				Type *t = alloc_type_array(t_string, count);
-				LLVMValueRef g = LLVMAddGlobal(m->mod, lb_type(m, t), name);
-				LLVMSetInitializer(g, LLVMConstNull(lb_type(m, t)));
-				LLVMSetLinkage(g, LLVMInternalLinkage);
-				if (LB_USE_GIANT_PACKED_STRUCT) {
-					lb_make_global_private_const(g);
-				}
-				lb_global_type_info_member_tags = lb_addr({g, alloc_type_pointer(t)});
-			}
+			lb_global_type_info_member_types   = global_type_info_make(m, LB_TYPE_INFO_TYPES_NAME,   t_type_info_ptr, count);
+			lb_global_type_info_member_names   = global_type_info_make(m, LB_TYPE_INFO_NAMES_NAME,   t_string,        count);
+			lb_global_type_info_member_offsets = global_type_info_make(m, LB_TYPE_INFO_OFFSETS_NAME, t_uintptr,       count+offsets_extra);
+			lb_global_type_info_member_usings  = global_type_info_make(m, LB_TYPE_INFO_USINGS_NAME,  t_bool,          count);
+			lb_global_type_info_member_tags    = global_type_info_make(m, LB_TYPE_INFO_TAGS_NAME,    t_string,        count);
 		}
 	}
 
@@ -2915,12 +2878,11 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 		}
 	}
 
-	TIME_SECTION("LLVM Runtime Type Information Creation");
-	gen->startup_type_info = lb_create_startup_type_info(default_module);
+	TIME_SECTION("LLVM Runtime Objective-C Names Creation");
 	gen->objc_names = lb_create_objc_names(default_module);
 
 	TIME_SECTION("LLVM Runtime Startup Creation (Global Variables & @(init))");
-	gen->startup_runtime = lb_create_startup_runtime(default_module, gen->startup_type_info, gen->objc_names, global_variables);
+	gen->startup_runtime = lb_create_startup_runtime(default_module, gen->objc_names, global_variables);
 
 	TIME_SECTION("LLVM Runtime Cleanup Creation & @(fini)");
 	gen->cleanup_runtime = lb_create_cleanup_runtime(default_module);
@@ -3000,7 +2962,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 			String filepath_ll = lb_filepath_ll_for_module(m);
 			if (LLVMPrintModuleToFile(m->mod, cast(char const *)filepath_ll.text, &llvm_error)) {
 				gb_printf_err("LLVM Error: %s\n", llvm_error);
-				gb_exit(1);
+				exit_with_errors();
 				return false;
 			}
 			array_add(&gen->output_temp_paths, filepath_ll);
@@ -3059,7 +3021,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 		}
 	}
 
-	gb_sort_array(gen->foreign_libraries.data, gen->foreign_libraries.count, foreign_library_cmp);
+	array_sort(gen->foreign_libraries, foreign_library_cmp);
 
 	return true;
 }

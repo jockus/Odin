@@ -221,6 +221,12 @@ gb_internal bool check_has_break(Ast *stmt, String const &label, bool implicit) 
 			return true;
 		}
 		break;
+
+	case Ast_ExprStmt:
+		if (stmt->ExprStmt.expr->viral_state_flags & ViralStateFlag_ContainsOrBreak) {
+			return true;
+		}
+		break;
 	}
 
 	return false;
@@ -485,7 +491,17 @@ gb_internal Type *check_assignment_variable(CheckerContext *ctx, Operand *lhs, O
 	}
 	}
 
+	Entity *lhs_e = entity_of_node(lhs->expr);
+	u8 prev_bit_field_bit_size = ctx->bit_field_bit_size;
+	if (lhs_e && lhs_e->kind == Entity_Variable && lhs_e->Variable.bit_field_bit_size) {
+		// HACK NOTE(bill): This is a bit of a hack, but it will work fine for this use case
+		ctx->bit_field_bit_size = lhs_e->Variable.bit_field_bit_size;
+	}
+
 	check_assignment(ctx, rhs, assignment_type, str_lit("assignment"));
+
+	ctx->bit_field_bit_size = prev_bit_field_bit_size;
+
 	if (rhs->mode == Addressing_Invalid) {
 		return nullptr;
 	}
@@ -867,6 +883,7 @@ gb_internal void check_inline_range_stmt(CheckerContext *ctx, Ast *node, u32 mod
 		}
 
 		if (ctx->inline_for_depth >= MAX_INLINE_FOR_DEPTH && prev_inline_for_depth < MAX_INLINE_FOR_DEPTH) {
+			ERROR_BLOCK();
 			if (prev_inline_for_depth > 0) {
 				error(node, "Nested '#unroll for' loop cannot be inlined as it exceeds the maximum '#unroll for' depth (%lld levels >= %lld maximum levels)", v, MAX_INLINE_FOR_DEPTH);
 			} else {
@@ -1085,8 +1102,7 @@ gb_internal void check_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags
 		}
 
 		if (unhandled.count > 0) {
-			begin_error_block();
-			defer (end_error_block());
+			ERROR_BLOCK();
 
 			if (unhandled.count == 1) {
 				error_no_newline(node, "Unhandled switch case: %.*s", LIT(unhandled[0]->token.string));
@@ -1350,6 +1366,8 @@ gb_internal void check_type_switch_stmt(CheckerContext *ctx, Ast *node, u32 mod_
 		}
 
 		if (unhandled.count > 0) {
+			ERROR_BLOCK();
+
 			if (unhandled.count == 1) {
 				gbString s = type_to_string(unhandled[0]);
 				error_no_newline(node, "Unhandled switch case: %s", s);
@@ -1448,25 +1466,6 @@ gb_internal bool check_stmt_internal_builtin_proc_id(Ast *expr, BuiltinProcId *i
 	return id != BuiltinProc_Invalid;
 }
 
-gb_internal bool check_expr_is_stack_variable(Ast *expr) {
-	/*
-	expr = unparen_expr(expr);
-	Entity *e = entity_of_node(expr);
-	if (e && e->kind == Entity_Variable) {
-		if (e->flags & (EntityFlag_Static|EntityFlag_Using|EntityFlag_ImplicitReference|EntityFlag_ForValue)) {
-			// okay
-		} else if (e->Variable.thread_local_model.len != 0) {
-			// okay
-		} else if (e->scope) {
-			if ((e->scope->flags & (ScopeFlag_Global|ScopeFlag_File|ScopeFlag_Type)) == 0) {
-				return true;
-			}
-		}
-	}
-	*/
-	return false;
-}
-
 gb_internal void check_range_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags) {
 	ast_node(rs, RangeStmt, node);
 
@@ -1528,8 +1527,19 @@ gb_internal void check_range_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags)
 				goto skip_expr_range_stmt;
 			}
 		} else if (operand.mode != Addressing_Invalid) {
+			if (operand.mode == Addressing_OptionalOk || operand.mode == Addressing_OptionalOkPtr) {
+				Ast *expr = unparen_expr(operand.expr);
+				if (expr->kind != Ast_TypeAssertion) { // Only for procedure calls
+					Type *end_type = nullptr;
+					check_promote_optional_ok(ctx, &operand, nullptr, &end_type, false);
+					if (is_type_boolean(end_type)) {
+						check_promote_optional_ok(ctx, &operand, nullptr, &end_type, true);
+					}
+				}
+			}
 			bool is_ptr = is_type_pointer(operand.type);
 			Type *t = base_type(type_deref(operand.type));
+
 			switch (t->kind) {
 			case Type_Basic:
 				if (t->Basic.kind == Basic_string || t->Basic.kind == Basic_UntypedString) {
@@ -1583,6 +1593,7 @@ gb_internal void check_range_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags)
 				{
 					isize count = t->Tuple.variables.count;
 					if (count < 1 || count > 3) {
+						ERROR_BLOCK();
 						check_not_tuple(ctx, &operand);
 						error_line("\tMultiple return valued parameters in a range statement are limited to a maximum of 2 usable values with a trailing boolean for the conditional\n");
 						break;
@@ -1637,6 +1648,8 @@ gb_internal void check_range_stmt(CheckerContext *ctx, Ast *node, u32 mod_flags)
 			gbString t = type_to_string(operand.type);
 			defer (gb_string_free(s));
 			defer (gb_string_free(t));
+
+			ERROR_BLOCK();
 
 			error(operand.expr, "Cannot iterate over '%s' of type '%s'", s, t);
 
@@ -1813,7 +1826,7 @@ gb_internal void check_value_decl_stmt(CheckerContext *ctx, Ast *node, u32 mod_f
 	}
 
 	if (new_name_count == 0) {
-		begin_error_block();
+		ERROR_BLOCK();
 		error(node, "No new declarations on the left hand side");
 		bool all_underscore = true;
 		for (Ast *name : vd->names) {
@@ -1831,7 +1844,6 @@ gb_internal void check_value_decl_stmt(CheckerContext *ctx, Ast *node, u32 mod_f
 			error_line("\tSuggestion: Try changing the declaration (:=) to an assignment (=)\n");
 		}
 
-		end_error_block();
 	}
 
 	Type *init_type = nullptr;
@@ -1897,17 +1909,19 @@ gb_internal void check_value_decl_stmt(CheckerContext *ctx, Ast *node, u32 mod_f
 			e->Variable.thread_local_model = ac.thread_local_model;
 		}
 
-		if (is_arch_wasm() && e->Variable.thread_local_model.len != 0) {
-			// error(e->token, "@(thread_local) is not supported for this target platform");
-		}
-
-
 		if (ac.is_static && ac.thread_local_model != "") {
 			error(e->token, "The 'static' attribute is not needed if 'thread_local' is applied");
 		}
 	}
 
+	// NOTE(bill): This is to improve error handling for things like `x: [?]T = {...}`
+	Ast *prev_type_hint_expr = ctx->type_hint_expr;
+	ctx->type_hint_expr = vd->type;
+
 	check_init_variables(ctx, entities, entity_count, vd->values, str_lit("variable declaration"));
+
+	ctx->type_hint_expr = prev_type_hint_expr;
+
 	check_arity_match(ctx, vd, false);
 
 	for (isize i = 0; i < entity_count; i++) {
@@ -1936,7 +1950,7 @@ gb_internal void check_value_decl_stmt(CheckerContext *ctx, Ast *node, u32 mod_f
 				TokenPos pos = f->token.pos;
 				Type *this_type = base_type(e->type);
 				Type *other_type = base_type(f->type);
-				if (!are_types_identical(this_type, other_type)) {
+				if (!signature_parameter_similar_enough(this_type, other_type)) {
 					error(e->token,
 					      "Foreign entity '%.*s' previously declared elsewhere with a different type\n"
 					      "\tat %s",
@@ -2073,6 +2087,9 @@ gb_internal void check_expr_stmt(CheckerContext *ctx, Ast *node) {
 		}
 		return;
 	}
+
+	ERROR_BLOCK();
+
 	gbString expr_str = expr_to_string(operand.expr);
 	error(node, "Expression is not used: '%s'", expr_str);
 	gb_string_free(expr_str);
@@ -2266,29 +2283,6 @@ gb_internal void check_return_stmt(CheckerContext *ctx, Ast *node) {
 			if (is_type_untyped(o->type)) {
 				update_untyped_expr_type(ctx, o->expr, e->type, true);
 			}
-
-
-			// NOTE(bill): This is very basic escape analysis
-			// This needs to be improved tremendously, and a lot of it done during the
-			// middle-end (or LLVM side) to improve checks and error messages
-			Ast *expr = unparen_expr(o->expr);
-			if (expr->kind == Ast_UnaryExpr && expr->UnaryExpr.op.kind == Token_And) {
-				Ast *x = unparen_expr(expr->UnaryExpr.expr);
-				if (x->kind == Ast_CompoundLit) {
-					error(expr, "Cannot return the address to a stack value from a procedure");
-				} else if (x->kind == Ast_IndexExpr) {
-					Ast *array = x->IndexExpr.expr;
-					if (is_type_array_like(type_of_expr(array)) && check_expr_is_stack_variable(array)) {
-						gbString t = type_to_string(type_of_expr(array));
-						error(expr, "Cannot return the address to an element of stack variable from a procedure, of type %s", t);
-						gb_string_free(t);
-					}
-				} else {
-					if (check_expr_is_stack_variable(x)) {
-						error(expr, "Cannot return the address to a stack variable from a procedure");
-					}
-				}
-			}
 		}
 	}
 
@@ -2296,16 +2290,51 @@ gb_internal void check_return_stmt(CheckerContext *ctx, Ast *node) {
 		if (o.expr == nullptr) {
 			continue;
 		}
-		if (o.expr->kind != Ast_CompoundLit || !is_type_slice(o.type)) {
-			continue;
+		Ast *expr = unparen_expr(o.expr);
+
+		auto unsafe_return_error = [](Operand const &o, char const *msg, Type *extra_type=nullptr) {
+			gbString s = expr_to_string(o.expr);
+			if (extra_type) {
+				gbString t = type_to_string(extra_type);
+				error(o.expr, "It is unsafe to return %s ('%s') of type ('%s') from a procedure, as it uses the current stack frame's memory", msg, s, t);
+				gb_string_free(t);
+			} else {
+				error(o.expr, "It is unsafe to return %s ('%s') from a procedure, as it uses the current stack frame's memory", msg, s);
+			}
+			gb_string_free(s);
+		};
+
+
+		// NOTE(bill): This is very basic escape analysis
+		// This needs to be improved tremendously, and a lot of it done during the
+		// middle-end (or LLVM side) to improve checks and error messages
+		if (expr->kind == Ast_CompoundLit && is_type_slice(o.type)) {
+			ast_node(cl, CompoundLit, expr);
+			if (cl->elems.count == 0) {
+				continue;
+			}
+			unsafe_return_error(o, "a compound literal of a slice");
+		} else if (expr->kind == Ast_UnaryExpr && expr->UnaryExpr.op.kind == Token_And) {
+			Ast *x = unparen_expr(expr->UnaryExpr.expr);
+			Entity *e = entity_of_node(x);
+			if (is_entity_local_variable(e)) {
+				unsafe_return_error(o, "the address of a local variable");
+			} else if(x->kind == Ast_CompoundLit) {
+				unsafe_return_error(o, "the address of a compound literal");
+			} else if (x->kind == Ast_IndexExpr) {
+				Entity *f = entity_of_node(x->IndexExpr.expr);
+				if (is_type_array_like(f->type) || is_type_matrix(f->type)) {
+					if (is_entity_local_variable(f)) {
+						unsafe_return_error(o, "the address of an indexed variable", f->type);
+					}
+				}
+			} else if (x->kind == Ast_MatrixIndexExpr) {
+				Entity *f = entity_of_node(x->MatrixIndexExpr.expr);
+				if (is_type_matrix(f->type) && is_entity_local_variable(f)) {
+					unsafe_return_error(o, "the address of an indexed variable", f->type);
+				}
+			}
 		}
-		ast_node(cl, CompoundLit, o.expr);
-		if (cl->elems.count == 0) {
-			continue;
-		}
-		gbString s = type_to_string(o.type);
-		error(o.expr, "It is unsafe to return a compound literal of a slice ('%s') with elements from a procedure, as the contents of the slice uses the current stack frame's memory", s);
-		gb_string_free(s);
 	}
 
 }

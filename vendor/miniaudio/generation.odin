@@ -4,10 +4,8 @@ import "core:c"
 
 when ODIN_OS == .Windows {
 	foreign import lib "lib/miniaudio.lib"
-} else when ODIN_OS == .Linux {
-	foreign import lib "lib/miniaudio.a"
 } else {
-	foreign import lib "system:miniaudio"
+	foreign import lib "lib/miniaudio.a"
 }
 
 waveform_type :: enum c.int {
@@ -51,7 +49,7 @@ noise_config :: struct {
 }
 
 noise :: struct {
-	ds:     data_source_vtable,
+	ds:     data_source_base,
 	config: noise_config,
 	lcg:    lcg,
 	state: struct #raw_union {

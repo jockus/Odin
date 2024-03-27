@@ -89,6 +89,7 @@ gb_internal void check_or_else_split_types(CheckerContext *c, Operand *x, String
 
 
 gb_internal void check_or_else_expr_no_value_error(CheckerContext *c, String const &name, Operand const &x, Type *type_hint) {
+	ERROR_BLOCK();
 	gbString t = type_to_string(x.type);
 	error(x.expr, "'%.*s' does not return a value, value is of type %s", LIT(name), t);
 	if (is_type_union(type_deref(x.type))) {
@@ -1083,13 +1084,16 @@ gb_internal bool cache_load_file_directive(CheckerContext *c, Ast *call, String 
 	ast_node(bd, BasicDirective, ce->proc);
 	String builtin_name = bd->name.string;
 
-	String base_dir = dir_from_path(get_file_path_string(call->file_id));
+	String path;
+	if (gb_path_is_absolute((char*)original_string.text)) {
+		path = original_string;
+	} else {
+		String base_dir = dir_from_path(get_file_path_string(call->file_id));
 
-	BlockingMutex *ignore_mutex = nullptr;
-	String path = {};
-	bool ok = determine_path_from_string(ignore_mutex, call, base_dir, original_string, &path);
-	gb_unused(ok);
-
+		BlockingMutex *ignore_mutex = nullptr;
+		bool ok = determine_path_from_string(ignore_mutex, call, base_dir, original_string, &path);
+		gb_unused(ok);
+	}
 
 	MUTEX_GUARD(&c->info->load_file_mutex);
 
@@ -1261,6 +1265,139 @@ gb_internal LoadDirectiveResult check_load_directive(CheckerContext *c, Operand 
 
 }
 
+gb_internal int file_cache_sort_cmp(void const *x, void const *y) {
+	LoadFileCache const *a = *(LoadFileCache const **)(x);
+	LoadFileCache const *b = *(LoadFileCache const **)(y);
+	return string_compare(a->path, b->path);
+}
+
+gb_internal LoadDirectiveResult check_load_directory_directive(CheckerContext *c, Operand *operand, Ast *call, Type *type_hint, bool err_on_not_found) {
+	ast_node(ce, CallExpr, call);
+	ast_node(bd, BasicDirective, ce->proc);
+	String name = bd->name.string;
+	GB_ASSERT(name == "load_directory");
+
+	if (ce->args.count != 1) {
+		error(ce->args[0], "'#%.*s' expects 1 argument, got %td", LIT(name), ce->args.count);
+		return LoadDirective_Error;
+	}
+
+	Ast *arg = ce->args[0];
+	Operand o = {};
+	check_expr(c, &o, arg);
+	if (o.mode != Addressing_Constant) {
+		error(arg, "'#%.*s' expected a constant string argument", LIT(name));
+		return LoadDirective_Error;
+	}
+
+	if (!is_type_string(o.type)) {
+		gbString str = type_to_string(o.type);
+		error(arg, "'#%.*s' expected a constant string, got %s", LIT(name), str);
+		gb_string_free(str);
+		return LoadDirective_Error;
+	}
+
+	GB_ASSERT(o.value.kind == ExactValue_String);
+
+	init_core_load_directory_file(c->checker);
+
+	operand->type = t_load_directory_file_slice;
+	operand->mode = Addressing_Value;
+
+
+	String original_string = o.value.value_string;
+	String path;
+	if (gb_path_is_absolute((char*)original_string.text)) {
+		path = original_string;
+	} else {
+		String base_dir = dir_from_path(get_file_path_string(call->file_id));
+
+		BlockingMutex *ignore_mutex = nullptr;
+		bool ok = determine_path_from_string(ignore_mutex, call, base_dir, original_string, &path);
+		gb_unused(ok);
+	}
+	MUTEX_GUARD(&c->info->load_directory_mutex);
+
+
+	gbFileError file_error = gbFileError_None;
+
+	Array<LoadFileCache *> file_caches = {};
+
+	LoadDirectoryCache **cache_ptr = string_map_get(&c->info->load_directory_cache, path);
+	LoadDirectoryCache *cache = cache_ptr ? *cache_ptr : nullptr;
+	if (cache) {
+		file_error = cache->file_error;
+	}
+	defer ({
+		if (cache == nullptr) {
+			LoadDirectoryCache *new_cache = gb_alloc_item(permanent_allocator(), LoadDirectoryCache);
+			new_cache->path = path;
+			new_cache->files = file_caches;
+			new_cache->file_error = file_error;
+			string_map_set(&c->info->load_directory_cache, path, new_cache);
+
+			map_set(&c->info->load_directory_map, call, new_cache);
+		} else {
+			cache->file_error = file_error;
+		}
+	});
+
+
+	LoadDirectiveResult result = LoadDirective_Success;
+
+
+	if (cache == nullptr)  {
+		Array<FileInfo> list = {};
+		ReadDirectoryError rd_err = read_directory(path, &list);
+		defer (array_free(&list));
+
+		if (list.count == 1) {
+			GB_ASSERT(path != list[0].fullpath);
+		}
+
+
+		switch (rd_err) {
+		case ReadDirectory_InvalidPath:
+			error(call, "%.*s error - invalid path: %.*s", LIT(name), LIT(original_string));
+			return LoadDirective_NotFound;
+		case ReadDirectory_NotExists:
+			error(call, "%.*s error - path does not exist: %.*s", LIT(name), LIT(original_string));
+			return LoadDirective_NotFound;
+		case ReadDirectory_Permission:
+			error(call, "%.*s error - unknown error whilst reading path, %.*s", LIT(name), LIT(original_string));
+			return LoadDirective_Error;
+		case ReadDirectory_NotDir:
+			error(call, "%.*s error - expected a directory, got a file: %.*s", LIT(name), LIT(original_string));
+			return LoadDirective_Error;
+		case ReadDirectory_Empty:
+			error(call, "%.*s error - empty directory: %.*s", LIT(name), LIT(original_string));
+			return LoadDirective_NotFound;
+		case ReadDirectory_Unknown:
+			error(call, "%.*s error - unknown error whilst reading path %.*s", LIT(name), LIT(original_string));
+			return LoadDirective_Error;
+		}
+
+		isize files_to_reserve = list.count+1; // always reserve 1
+
+		file_caches = array_make<LoadFileCache *>(heap_allocator(), 0, files_to_reserve);
+
+		for (FileInfo fi : list) {
+			LoadFileCache *cache = nullptr;
+			if (cache_load_file_directive(c, call, fi.fullpath, err_on_not_found, &cache)) {
+				array_add(&file_caches, cache);
+			} else {
+				result = LoadDirective_Error;
+			}
+		}
+
+		array_sort(file_caches, file_cache_sort_cmp);
+
+	}
+
+	return result;
+}
+
+
 
 gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *operand, Ast *call, Type *type_hint) {
 	ast_node(ce, CallExpr, call);
@@ -1288,6 +1425,8 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 		operand->mode = Addressing_Value;
 	} else if (name == "load") {
 		return check_load_directive(c, operand, call, type_hint, true) == LoadDirective_Success;
+	} else if (name == "load_directory") {
+		return check_load_directory_directive(c, operand, call, type_hint, true) == LoadDirective_Success;
 	} else if (name == "load_hash") {
 		if (ce->args.count != 2) {
 			if (ce->args.count == 0) {
@@ -1405,58 +1544,6 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 			return true;
 		}
 		return false;
-	} else if (name == "load_or") {
-		error(call, "'#load_or' has now been removed in favour of '#load(path) or_else default'");
-
-		if (ce->args.count != 2) {
-			if (ce->args.count == 0) {
-				error(ce->close, "'#load_or' expects 2 arguments, got 0");
-			} else {
-				error(ce->args[0], "'#load_or' expects 2 arguments, got %td", ce->args.count);
-			}
-			return false;
-		}
-
-		Ast *arg = ce->args[0];
-		Operand o = {};
-		check_expr(c, &o, arg);
-		if (o.mode != Addressing_Constant) {
-			error(arg, "'#load_or' expected a constant string argument");
-			return false;
-		}
-
-		if (!is_type_string(o.type)) {
-			gbString str = type_to_string(o.type);
-			error(arg, "'#load_or' expected a constant string, got %s", str);
-			gb_string_free(str);
-			return false;
-		}
-
-		Ast *default_arg = ce->args[1];
-		Operand default_op = {};
-		check_expr_with_type_hint(c, &default_op, default_arg, t_u8_slice);
-		if (default_op.mode != Addressing_Constant) {
-			error(arg, "'#load_or' expected a constant '[]byte' argument");
-			return false;
-		}
-
-		if (!are_types_identical(base_type(default_op.type), t_u8_slice)) {
-			gbString str = type_to_string(default_op.type);
-			error(arg, "'#load_or' expected a constant '[]byte', got %s", str);
-			gb_string_free(str);
-			return false;
-		}
-		GB_ASSERT(o.value.kind == ExactValue_String);
-		String original_string = o.value.value_string;
-
-		operand->type = t_u8_slice;
-		operand->mode = Addressing_Constant;
-		LoadFileCache *cache = nullptr;
-		if (cache_load_file_directive(c, call, original_string, false, &cache)) {
-			operand->value = exact_value_string(cache->data);
-		} else {
-			operand->value = default_op.value;
-		}
 	} else if (name == "assert") {
 		if (ce->args.count != 1 && ce->args.count != 2) {
 			error(call, "'#assert' expects either 1 or 2 arguments, got %td", ce->args.count);
@@ -1479,6 +1566,7 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 		}
 
 		if (!operand->value.value_bool) {
+			ERROR_BLOCK();
 			gbString arg1 = expr_to_string(ce->args[0]);
 			gbString arg2 = {};
 
@@ -1504,6 +1592,7 @@ gb_internal bool check_builtin_procedure_directive(CheckerContext *c, Operand *o
 		operand->type = t_untyped_bool;
 		operand->mode = Addressing_Constant;
 	} else if (name == "panic") {
+		ERROR_BLOCK();
 		if (ce->args.count != 1) {
 			error(call, "'#panic' expects 1 argument, got %td", ce->args.count);
 			return false;
@@ -1663,7 +1752,12 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 	if (ce->args.count > 0) {
 		if (ce->args[0]->kind == Ast_FieldValue) {
-			if (id != BuiltinProc_soa_zip) {
+			switch (id) {
+			case BuiltinProc_soa_zip:
+			case BuiltinProc_quaternion:
+				// okay
+				break;
+			default:
 				error(call, "'field = value' calling is not allowed on built-in procedures");
 				return false;
 			}
@@ -2296,61 +2390,150 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 	}
 
 	case BuiltinProc_quaternion: {
-		// quaternion :: proc(real, imag, jmag, kmag: float_type) -> complex_type
-		Operand x = *operand;
-		Operand y = {};
-		Operand z = {};
-		Operand w = {};
+		bool first_is_field_value = (ce->args[0]->kind == Ast_FieldValue);
+
+		bool fail = false;
+		for (Ast *arg : ce->args) {
+			bool mix = false;
+			if (first_is_field_value) {
+				mix = arg->kind != Ast_FieldValue;
+			} else {
+				mix = arg->kind == Ast_FieldValue;
+			}
+			if (mix) {
+				error(arg, "Mixture of 'field = value' and value elements in the procedure call '%.*s' is not allowed", LIT(builtin_name));
+				fail = true;
+				break;
+			}
+		}
+
+		if (fail) {
+			operand->type = t_untyped_quaternion;
+			operand->mode = Addressing_Constant;
+			operand->value = exact_value_quaternion(0.0, 0.0, 0.0, 0.0);
+			break;
+		}
+
+		// quaternion :: proc(imag, jmag, kmag, real: float_type) -> complex_type
+		Operand xyzw[4] = {};
+
+		u32 first_index = 0;
 
 		// NOTE(bill): Invalid will be the default till fixed
 		operand->type = t_invalid;
 		operand->mode = Addressing_Invalid;
 
-		check_expr(c, &y, ce->args[1]);
-		if (y.mode == Addressing_Invalid) {
-			return false;
-		}
-		check_expr(c, &z, ce->args[2]);
-		if (y.mode == Addressing_Invalid) {
-			return false;
-		}
-		check_expr(c, &w, ce->args[3]);
-		if (y.mode == Addressing_Invalid) {
-			return false;
+		if (first_is_field_value) {
+			u32 fields_set[4] = {}; // 0 unset, 1 xyzw, 2 real/etc
+
+			auto const check_field = [&fields_set, &builtin_name](CheckerContext *c, Operand *o, Ast *arg, i32 *index) -> bool {
+				*index = -1;
+
+				ast_node(field, FieldValue, arg);
+				String name = {};
+				if (field->field->kind == Ast_Ident) {
+					name = field->field->Ident.token.string;
+				} else {
+					error(field->field, "Expected an identifier for field argument");
+					return false;
+				}
+
+				u32 style = 0;
+
+				if (name == "x") {
+					*index = 0; style = 1;
+				} else if (name == "y") {
+					*index = 1; style = 1;
+				} else if (name == "z") {
+					*index = 2; style = 1;
+				}  else if (name == "w") {
+					*index = 3; style = 1;
+				} else if (name == "imag") {
+					*index = 0; style = 2;
+				} else if (name == "jmag") {
+					*index = 1; style = 2;
+				} else if (name == "kmag") {
+					*index = 2; style = 2;
+				}  else if (name == "real") {
+					*index = 3; style = 2;
+				} else {
+					error(field->field, "Unknown name for '%.*s', expected (w, x, y, z; or real, imag, jmag, kmag), got '%.*s'", LIT(builtin_name), LIT(name));
+					return false;
+				}
+
+				if (fields_set[*index]) {
+					error(field->field, "Previously assigned field: '%.*s'", LIT(name));
+				}
+				fields_set[*index] = style;
+
+				check_expr(c, o, field->value);
+				return o->mode != Addressing_Invalid;
+			};
+
+			Operand *refs[4] = {&xyzw[0], &xyzw[1], &xyzw[2], &xyzw[3]};
+
+			for (i32 i = 0; i < 4; i++) {
+				i32 index = -1;
+				Operand o = {};
+				bool ok = check_field(c, &o, ce->args[i], &index);
+				if (!ok || index < 0) {
+					return false;
+				}
+				first_index = cast(u32)index;
+				*refs[index] = o;
+			}
+
+			for (i32 i = 0; i < 4; i++) {
+				GB_ASSERT(fields_set[i]);
+			}
+			for (i32 i = 1; i < 4; i++) {
+				if (fields_set[i] != fields_set[i-1]) {
+					error(call, "Mixture of xyzw and real/etc is not allowed with '%.*s'", LIT(builtin_name));
+					break;
+				}
+			}
+		} else {
+			error(call, "'%.*s' requires that all arguments are named (w, x, y, z; or real, imag, jmag, kmag)", LIT(builtin_name));
+
+			for (i32 i = 0; i < 4; i++) {
+				check_expr(c, &xyzw[i], ce->args[i]);
+				if (xyzw[i].mode == Addressing_Invalid) {
+					return false;
+				}
+			}
 		}
 
-		convert_to_typed(c, &x, y.type); if (x.mode == Addressing_Invalid) return false;
-		convert_to_typed(c, &y, x.type); if (y.mode == Addressing_Invalid) return false;
-		convert_to_typed(c, &z, x.type); if (z.mode == Addressing_Invalid) return false;
-		convert_to_typed(c, &w, x.type); if (w.mode == Addressing_Invalid) return false;
-		if (x.mode == Addressing_Constant &&
-		    y.mode == Addressing_Constant &&
-		    z.mode == Addressing_Constant &&
-		    w.mode == Addressing_Constant) {
-		    	x.value = exact_value_to_float(x.value);
-		    	y.value = exact_value_to_float(y.value);
-		    	z.value = exact_value_to_float(z.value);
-		    	w.value = exact_value_to_float(w.value);
-			if (is_type_numeric(x.type) && x.value.kind == ExactValue_Float) {
-				x.type = t_untyped_float;
+
+		for (u32 i = 0; i < 4; i++ ){
+			u32 j = (i + first_index) % 4;
+			if (j == first_index) {
+				convert_to_typed(c, &xyzw[j], xyzw[(first_index+1)%4].type); if (xyzw[j].mode == Addressing_Invalid) return false;
+			} else {
+				convert_to_typed(c, &xyzw[j], xyzw[first_index].type); if (xyzw[j].mode == Addressing_Invalid) return false;
 			}
-			if (is_type_numeric(y.type) && y.value.kind == ExactValue_Float) {
-				y.type = t_untyped_float;
+		}
+		if (xyzw[0].mode == Addressing_Constant &&
+		    xyzw[1].mode == Addressing_Constant &&
+		    xyzw[2].mode == Addressing_Constant &&
+		    xyzw[3].mode == Addressing_Constant) {
+			for (i32 i = 0; i < 4; i++) {
+				xyzw[i].value = exact_value_to_float(xyzw[i].value);
 			}
-			if (is_type_numeric(z.type) && z.value.kind == ExactValue_Float) {
-				z.type = t_untyped_float;
-			}
-			if (is_type_numeric(w.type) && w.value.kind == ExactValue_Float) {
-				w.type = t_untyped_float;
+			for (i32 i = 0; i < 4; i++) {
+				if (is_type_numeric(xyzw[i].type) && xyzw[i].value.kind == ExactValue_Float) {
+					xyzw[i].type = t_untyped_float;
+				}
 			}
 		}
 
-		if (!(are_types_identical(x.type, y.type) && are_types_identical(x.type, z.type) && are_types_identical(x.type, w.type))) {
-			gbString tx = type_to_string(x.type);
-			gbString ty = type_to_string(y.type);
-			gbString tz = type_to_string(z.type);
-			gbString tw = type_to_string(w.type);
-			error(call, "Mismatched types to 'quaternion', '%s' vs '%s' vs '%s' vs '%s'", tx, ty, tz, tw);
+		if (!(are_types_identical(xyzw[0].type, xyzw[1].type) &&
+		      are_types_identical(xyzw[0].type, xyzw[2].type) &&
+		      are_types_identical(xyzw[0].type, xyzw[3].type))) {
+			gbString tx = type_to_string(xyzw[0].type);
+			gbString ty = type_to_string(xyzw[1].type);
+			gbString tz = type_to_string(xyzw[2].type);
+			gbString tw = type_to_string(xyzw[3].type);
+			error(call, "Mismatched types to 'quaternion', 'x=%s' vs 'y=%s' vs 'z=%s' vs 'w=%s'", tx, ty, tz, tw);
 			gb_string_free(tw);
 			gb_string_free(tz);
 			gb_string_free(ty);
@@ -2358,31 +2541,35 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			return false;
 		}
 
-		if (!is_type_float(x.type)) {
-			gbString s = type_to_string(x.type);
+		if (!is_type_float(xyzw[0].type)) {
+			gbString s = type_to_string(xyzw[0].type);
 			error(call, "Arguments have type '%s', expected a floating point", s);
 			gb_string_free(s);
 			return false;
 		}
-		if (is_type_endian_specific(x.type)) {
-			gbString s = type_to_string(x.type);
+		if (is_type_endian_specific(xyzw[0].type)) {
+			gbString s = type_to_string(xyzw[0].type);
 			error(call, "Arguments with a specified endian are not allow, expected a normal floating point, got '%s'", s);
 			gb_string_free(s);
 			return false;
 		}
 
-		if (x.mode == Addressing_Constant && y.mode == Addressing_Constant && z.mode == Addressing_Constant && w.mode == Addressing_Constant) {
-			f64 r = exact_value_to_float(x.value).value_float;
-			f64 i = exact_value_to_float(y.value).value_float;
-			f64 j = exact_value_to_float(z.value).value_float;
-			f64 k = exact_value_to_float(w.value).value_float;
+
+		operand->mode = Addressing_Value;
+
+		if (xyzw[0].mode == Addressing_Constant &&
+		    xyzw[1].mode == Addressing_Constant &&
+		    xyzw[2].mode == Addressing_Constant &&
+		    xyzw[3].mode == Addressing_Constant) {
+			f64 r = exact_value_to_float(xyzw[3].value).value_float;
+			f64 i = exact_value_to_float(xyzw[0].value).value_float;
+			f64 j = exact_value_to_float(xyzw[1].value).value_float;
+			f64 k = exact_value_to_float(xyzw[2].value).value_float;
 			operand->value = exact_value_quaternion(r, i, j, k);
 			operand->mode = Addressing_Constant;
-		} else {
-			operand->mode = Addressing_Value;
 		}
 
-		BasicKind kind = core_type(x.type)->Basic.kind;
+		BasicKind kind = core_type(xyzw[first_index].type)->Basic.kind;
 		switch (kind) {
 		case Basic_f16:          operand->type = t_quaternion64;       break;
 		case Basic_f32:          operand->type = t_quaternion128;      break;
@@ -3089,7 +3276,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				mix = arg->kind == Ast_FieldValue;
 			}
 			if (mix) {
-				error(arg, "Mixture of 'field = value' and value elements in the procedure call 'soa_zip' is not allowed");
+				error(arg, "Mixture of 'field = value' and value elements in the procedure call '%.*s' is not allowed", LIT(builtin_name));
 				fail = true;
 				break;
 			}
@@ -3206,6 +3393,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			elem->Struct.tags = gb_alloc_array(permanent_allocator(), String, fields.count);
 			elem->Struct.node = dummy_node_struct;
 			type_set_offsets(elem);
+			wait_signal_set(&elem->Struct.fields_wait_signal);
 		}
 
 		Type *soa_type = make_soa_struct_slice(c, dummy_node_soa, nullptr, elem);
@@ -3304,7 +3492,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			}
 		} else {
 			GB_ASSERT(t->kind == Type_Matrix);
-			operand->type = alloc_type_matrix(t->Matrix.elem, t->Matrix.column_count, t->Matrix.row_count);
+			operand->type = alloc_type_matrix(t->Matrix.elem, t->Matrix.column_count, t->Matrix.row_count, nullptr, nullptr, t->Matrix.is_row_major);
 		}
 		operand->type = check_matrix_type_hint(operand->type, type_hint);
 		break;
@@ -3372,7 +3560,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 		}
 		
 		operand->mode = Addressing_Value;
-		operand->type = alloc_type_matrix(elem, xt->Array.count, yt->Array.count);	
+		operand->type = alloc_type_matrix(elem, xt->Array.count, yt->Array.count, nullptr, nullptr, false);
 		operand->type = check_matrix_type_hint(operand->type, type_hint);
 		break;
 	}
@@ -3579,6 +3767,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				soa_struct->Struct.tags[i] = old_struct->Struct.tags[i];
 			}
 		}
+		wait_signal_set(&soa_struct->Struct.fields_wait_signal);
 
 		Token token = {};
 		token.string = str_lit("Base_Type");
@@ -4744,6 +4933,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			case TargetOs_essence:
 			case TargetOs_freebsd:
 			case TargetOs_openbsd:
+			case TargetOs_haiku:
 				switch (build_context.metrics.arch) {
 				case TargetArch_i386:
 				case TargetArch_amd64:
@@ -4791,8 +4981,10 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			switch (bt->kind) {
 			case Type_Basic:
 				switch (bt->Basic.kind) {
+				case Basic_complex32:  operand->type = t_f16; break;
 				case Basic_complex64:  operand->type = t_f32; break;
 				case Basic_complex128: operand->type = t_f64; break;
+				case Basic_quaternion64:  operand->type = t_f16; break;
 				case Basic_quaternion128: operand->type = t_f32; break;
 				case Basic_quaternion256: operand->type = t_f64; break;
 				}
@@ -5583,7 +5775,7 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 				return false;
 			}
 
-			operand->value = exact_value_bool(is_type_subtype_of(op_src.type, op_dst.type));
+			operand->value = exact_value_bool(is_type_subtype_of_and_allow_polymorphic(op_src.type, op_dst.type));
 			operand->mode = Addressing_Constant;
 			operand->type = t_untyped_bool;
 		} break;
@@ -5633,6 +5825,26 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 			break;
 		}
 		break;
+
+	case BuiltinProc_type_bit_set_backing_type:
+		{
+			Operand op = {};
+			Type *type = check_type(c, ce->args[0]);
+			Type *bt = base_type(type);
+			if (bt == nullptr || bt == t_invalid) {
+				error(ce->args[0], "Expected a type for '%.*s'", LIT(builtin_name));
+				return false;
+			}
+			if (bt->kind != Type_BitSet) {
+				gbString s = type_to_string(type);
+				error(ce->args[0], "Expected a bit_set type for '%.*s', got %s", LIT(builtin_name), s);
+				return false;
+			}
+
+			operand->mode = Addressing_Type;
+			operand->type = bit_set_to_int(bt);
+			break;
+		}
 
 	case BuiltinProc_type_equal_proc:
 		{

@@ -329,6 +329,18 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 		}
 	}
 
+	if (p->body && entity->Procedure.has_instrumentation) {
+		Entity *instrumentation_enter = m->info->instrumentation_enter_entity;
+		Entity *instrumentation_exit  = m->info->instrumentation_exit_entity;
+		if (instrumentation_enter && instrumentation_exit) {
+			String enter = lb_get_entity_name(m, instrumentation_enter);
+			String exit  = lb_get_entity_name(m, instrumentation_exit);
+
+			lb_add_attribute_to_proc_with_string(m, p->value, make_string_c("instrument-function-entry"), enter);
+			lb_add_attribute_to_proc_with_string(m, p->value, make_string_c("instrument-function-exit"),  exit);
+		}
+	}
+
 	lbValue proc_value = {p->value, p->type};
 	lb_add_entity(m, entity,  proc_value);
 	lb_add_member(m, p->name, proc_value);
@@ -1387,8 +1399,7 @@ gb_internal lbValue lb_build_builtin_simd_proc(lbProcedure *p, Ast *expr, TypeAn
 		return res;
 	case BuiltinProc_simd_min:
 		if (is_float) {
-			LLVMValueRef cond = LLVMBuildFCmp(p->builder, LLVMRealOLT, arg0.value, arg1.value, "");
-			res.value = LLVMBuildSelect(p->builder, cond, arg0.value, arg1.value, "");
+			return lb_emit_min(p, res.type, arg0, arg1);
 		} else {
 			LLVMValueRef cond = LLVMBuildICmp(p->builder, is_signed ? LLVMIntSLT : LLVMIntULT, arg0.value, arg1.value, "");
 			res.value = LLVMBuildSelect(p->builder, cond, arg0.value, arg1.value, "");
@@ -1396,8 +1407,7 @@ gb_internal lbValue lb_build_builtin_simd_proc(lbProcedure *p, Ast *expr, TypeAn
 		return res;
 	case BuiltinProc_simd_max:
 		if (is_float) {
-			LLVMValueRef cond = LLVMBuildFCmp(p->builder, LLVMRealOGT, arg0.value, arg1.value, "");
-			res.value = LLVMBuildSelect(p->builder, cond, arg0.value, arg1.value, "");
+			return lb_emit_max(p, res.type, arg0, arg1);
 		} else {
 			LLVMValueRef cond = LLVMBuildICmp(p->builder, is_signed ? LLVMIntSGT : LLVMIntUGT, arg0.value, arg1.value, "");
 			res.value = LLVMBuildSelect(p->builder, cond, arg0.value, arg1.value, "");
@@ -1681,24 +1691,61 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 	case BuiltinProc_DIRECTIVE: {
 		ast_node(bd, BasicDirective, ce->proc);
 		String name = bd->name.string;
-		GB_ASSERT(name == "location");
-		String procedure = p->entity->token.string;
-		TokenPos pos = ast_token(ce->proc).pos;
-		if (ce->args.count > 0) {
-			Ast *ident = unselector_expr(ce->args[0]);
-			GB_ASSERT(ident->kind == Ast_Ident);
-			Entity *e = entity_of_node(ident);
-			GB_ASSERT(e != nullptr);
+		if (name == "location") {
+			String procedure = p->entity->token.string;
+			TokenPos pos = ast_token(ce->proc).pos;
+			if (ce->args.count > 0) {
+				Ast *ident = unselector_expr(ce->args[0]);
+				GB_ASSERT(ident->kind == Ast_Ident);
+				Entity *e = entity_of_node(ident);
+				GB_ASSERT(e != nullptr);
 
-			if (e->parent_proc_decl != nullptr && e->parent_proc_decl->entity != nullptr) {
-				procedure = e->parent_proc_decl->entity->token.string;
-			} else {
-				procedure = str_lit("");
+				if (e->parent_proc_decl != nullptr && e->parent_proc_decl->entity != nullptr) {
+					procedure = e->parent_proc_decl->entity->token.string;
+				} else {
+					procedure = str_lit("");
+				}
+				pos = e->token.pos;
+
 			}
-			pos = e->token.pos;
+			return lb_emit_source_code_location_as_global(p, procedure, pos);
+		} else if (name == "load_directory") {
+			lbModule *m = p->module;
+			TEMPORARY_ALLOCATOR_GUARD();
+			LoadDirectoryCache *cache = map_must_get(&m->info->load_directory_map, expr);
+			isize count = cache->files.count;
 
+			LLVMValueRef *elements = gb_alloc_array(temporary_allocator(), LLVMValueRef, count);
+			for_array(i, cache->files) {
+				LoadFileCache *file = cache->files[i];
+
+				String file_name = filename_without_directory(file->path);
+
+				LLVMValueRef values[2] = {};
+				values[0] = lb_const_string(m, file_name).value;
+				values[1] = lb_const_string(m, file->data).value;
+				LLVMValueRef element = llvm_const_named_struct(m, t_load_directory_file, values, gb_count_of(values));
+				elements[i] = element;
+			}
+
+			LLVMValueRef backing_array = llvm_const_array(lb_type(m, t_load_directory_file), elements, count);
+
+			Type *array_type = alloc_type_array(t_load_directory_file, count);
+			lbAddr backing_array_addr = lb_add_global_generated(m, array_type, {backing_array, array_type}, nullptr);
+			lb_make_global_private_const(backing_array_addr);
+
+			LLVMValueRef backing_array_ptr = backing_array_addr.addr.value;
+			backing_array_ptr = LLVMConstPointerCast(backing_array_ptr, lb_type(m, t_load_directory_file_ptr));
+
+			LLVMValueRef const_slice = llvm_const_slice_internal(m, backing_array_ptr, LLVMConstInt(lb_type(m, t_int), count, false));
+
+			lbAddr addr = lb_add_global_generated(p->module, tv.type, {const_slice, t_load_directory_file_slice}, nullptr);
+			lb_make_global_private_const(addr);
+
+			return lb_addr_load(p, addr);
+		} else {
+			GB_PANIC("UNKNOWN DIRECTIVE: %.*s", LIT(name));
 		}
-		return lb_emit_source_code_location_as_global(p, procedure, pos);
 	}
 
 	case BuiltinProc_type_info_of: {
@@ -1706,7 +1753,7 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 		TypeAndValue tav = type_and_value_of_expr(arg);
 		if (tav.mode == Addressing_Type) {
 			Type *t = default_type(type_of_expr(arg));
-			return lb_type_info(p->module, t);
+			return lb_type_info(p, t);
 		}
 		GB_ASSERT(is_type_typeid(tav.type));
 
@@ -1826,24 +1873,41 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 	}
 
 	case BuiltinProc_quaternion: {
-		lbValue real = lb_build_expr(p, ce->args[0]);
-		lbValue imag = lb_build_expr(p, ce->args[1]);
-		lbValue jmag = lb_build_expr(p, ce->args[2]);
-		lbValue kmag = lb_build_expr(p, ce->args[3]);
+		lbValue xyzw[4] = {};
+		for (i32 i = 0; i < 4; i++) {
+			ast_node(f, FieldValue, ce->args[i]);
+			GB_ASSERT(f->field->kind == Ast_Ident);
+			String name = f->field->Ident.token.string;
+			i32 index = -1;
 
-		// @QuaternionLayout
+			// @QuaternionLayout
+			if (name == "x" || name == "imag") {
+				index = 0;
+			} else if (name == "y" || name == "jmag") {
+				index = 1;
+			} else if (name == "z" || name == "kmag") {
+				index = 2;
+			} else if (name == "w" || name == "real") {
+				index = 3;
+			}
+			GB_ASSERT(index >= 0);
+
+			xyzw[index] = lb_build_expr(p, f->value);
+		}
+
+
 		lbAddr dst_addr = lb_add_local_generated(p, tv.type, false);
 		lbValue dst = lb_addr_get_ptr(p, dst_addr);
 
 		Type *ft = base_complex_elem_type(tv.type);
-		real = lb_emit_conv(p, real, ft);
-		imag = lb_emit_conv(p, imag, ft);
-		jmag = lb_emit_conv(p, jmag, ft);
-		kmag = lb_emit_conv(p, kmag, ft);
-		lb_emit_store(p, lb_emit_struct_ep(p, dst, 3), real);
-		lb_emit_store(p, lb_emit_struct_ep(p, dst, 0), imag);
-		lb_emit_store(p, lb_emit_struct_ep(p, dst, 1), jmag);
-		lb_emit_store(p, lb_emit_struct_ep(p, dst, 2), kmag);
+		xyzw[0] = lb_emit_conv(p, xyzw[0], ft);
+		xyzw[1] = lb_emit_conv(p, xyzw[1], ft);
+		xyzw[2] = lb_emit_conv(p, xyzw[2], ft);
+		xyzw[3] = lb_emit_conv(p, xyzw[3], ft);
+		lb_emit_store(p, lb_emit_struct_ep(p, dst, 0), xyzw[0]);
+		lb_emit_store(p, lb_emit_struct_ep(p, dst, 1), xyzw[1]);
+		lb_emit_store(p, lb_emit_struct_ep(p, dst, 2), xyzw[2]);
+		lb_emit_store(p, lb_emit_struct_ep(p, dst, 3), xyzw[3]);
 
 		return lb_emit_load(p, dst);
 	}
@@ -2004,9 +2068,9 @@ gb_internal lbValue lb_build_builtin_proc(lbProcedure *p, Ast *expr, TypeAndValu
 
 	case BuiltinProc_clamp:
 		return lb_emit_clamp(p, type_of_expr(expr),
-							 lb_build_expr(p, ce->args[0]),
-							 lb_build_expr(p, ce->args[1]),
-							 lb_build_expr(p, ce->args[2]));
+		                     lb_build_expr(p, ce->args[0]),
+		                     lb_build_expr(p, ce->args[1]),
+		                     lb_build_expr(p, ce->args[2]));
 
 
 	case BuiltinProc_soa_zip:
@@ -3295,9 +3359,9 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr) {
 					for (Ast *var_arg : variadic) {
 						lbValue arg = lb_build_expr(p, var_arg);
 						if (is_type_any(elem_type)) {
-							array_add(&args, lb_emit_conv(p, arg, default_type(arg.type)));
+							array_add(&args, lb_emit_conv(p, arg, c_vararg_promote_type(default_type(arg.type))));
 						} else {
-							array_add(&args, lb_emit_conv(p, arg, elem_type));
+							array_add(&args, lb_emit_conv(p, arg, c_vararg_promote_type(elem_type)));
 						}
 					}
 					break;
@@ -3385,7 +3449,7 @@ gb_internal lbValue lb_build_call_expr_internal(lbProcedure *p, Ast *expr) {
 			}
 
 			lbValue arg = args[arg_index];
-			if (arg.value == nullptr) {
+			if (arg.value == nullptr && arg.type == nullptr) {
 				switch (e->kind) {
 				case Entity_TypeName:
 					args[arg_index] = lb_const_nil(p->module, e->type);

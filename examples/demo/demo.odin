@@ -44,7 +44,13 @@ the_basics :: proc() {
 	fmt.println("\n# the basics")
 
 	{ // The Basics
-		fmt.println("Hellope")
+
+		// os.args holds the path to the current executable and any arguments passed to it.
+		if len(os.args) == 1 {
+			fmt.printf("Hellope from %v.\n", os.args[0])
+		} else {
+			fmt.printf("%v, %v! from %v.\n", os.args[1], os.args[2], os.args[0])
+		}
 
 		// Lexical elements and literals
 		// A comment
@@ -535,7 +541,7 @@ struct_type :: proc() {
 		p.x = 1335
 		fmt.println(v)
 
-		// We could write p^.x, however, it is to nice abstract the ability
+		// We could write p^.x, however, it is nice to abstract the ability
 		// to not explicitly dereference the pointer. This is very useful when
 		// refactoring code to use a pointer rather than a value, and vice versa.
 	}
@@ -1508,7 +1514,7 @@ quaternions :: proc() {
 
 	{ // Quaternion operations
 		q := 1 + 2i + 3j + 4k
-		r := quaternion(5, 6, 7, 8)
+		r := quaternion(real=5, imag=6, jmag=7, kmag=8)
 		t := q * r
 		fmt.printf("(%v) * (%v) = %v\n", q, r, t)
 		v := q / r
@@ -1521,8 +1527,10 @@ quaternions :: proc() {
 	{ // The quaternion types
 		q128: quaternion128 // 4xf32
 		q256: quaternion256 // 4xf64
-		q128 = quaternion(1, 0, 0, 0)
-		q256 = 1 // quaternion(1, 0, 0, 0)
+		q128 = quaternion(w=1, x=0, y=0, z=0)
+		q256 = 1 // quaternion(x=0, y=0, z=0, w=1)
+
+		// NOTE: The internal memory layout of a quaternion is xyzw
 	}
 	{ // Built-in procedures
 		q := 1 + 2i + 3j + 4k
@@ -2430,7 +2438,7 @@ matrix_type :: proc() {
 
 		// component-wise multiplication
 		// since a * b would be a standard matrix multiplication
-		c6 := hadamard_product(a, b)
+		c6 := intrinsics.hadamard_product(a, b)
 
 
 		fmt.println("a + b",  c0)
@@ -2472,7 +2480,7 @@ matrix_type :: proc() {
 			5, 0, 6, 0,
 			0, 7, 0, 8,
 		}
-		fmt.println("b4", matrix_flatten(b4))
+		fmt.println("b4", intrinsics.matrix_flatten(b4))
 	}
 
 	{ // Casting non-square matrices
@@ -2511,7 +2519,7 @@ matrix_type :: proc() {
 	// This is because matrices are stored as values (not a reference type), and thus operations on them will
 	// be stored on the stack. Restricting the maximum element count minimizing the possibility of stack overflows.
 
-	// Built-in Procedures (Compiler Level)
+	// 'intrinsics' Procedures (Compiler Level)
 	// 	transpose(m)
 	//		transposes a matrix
 	// 	outer_product(a, b)
@@ -2532,13 +2540,13 @@ matrix_type :: proc() {
 	//	conj(x)
 	//		conjugates the elements of a matrix for complex element types only
 
-	// Built-in Procedures (Runtime Level) (all square matrix procedures)
+	// Procedures in "core:math/linalg" and related (Runtime Level) (all square matrix procedures)
 	// 	determinant(m)
 	// 	adjugate(m)
 	// 	inverse(m)
 	// 	inverse_transpose(m)
 	// 	hermitian_adjoint(m)
-	// 	matrix_trace(m)
+	// 	trace(m)
 	// 	matrix_minor(m)
 }
 

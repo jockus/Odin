@@ -21,7 +21,7 @@ COMMON_LVB_REVERSE_VIDEO   :: WORD(0x4000)
 COMMON_LVB_UNDERSCORE      :: WORD(0x8000)
 COMMON_LVB_SBCSDBCS        :: WORD(0x0300)
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	OutputDebugStringA :: proc(lpOutputString: LPCSTR) --- // The only A thing that is allowed
 	OutputDebugStringW :: proc(lpOutputString: LPCWSTR) ---
@@ -112,7 +112,7 @@ foreign kernel32 {
 	CreateThread :: proc(
 		lpThreadAttributes: LPSECURITY_ATTRIBUTES,
 		dwStackSize: SIZE_T,
-		lpStartAddress: proc "stdcall" (rawptr) -> DWORD,
+		lpStartAddress: proc "system" (rawptr) -> DWORD,
 		lpParameter: LPVOID,
 		dwCreationFlags: DWORD,
 		lpThreadId: LPDWORD,
@@ -121,7 +121,7 @@ foreign kernel32 {
 		hProcess: HANDLE,
 		lpThreadAttributes: LPSECURITY_ATTRIBUTES,
 		dwStackSize: SIZE_T,
-		lpStartAddress: proc "stdcall" (rawptr) -> DWORD,
+		lpStartAddress: proc "system" (rawptr) -> DWORD,
 		lpParameter: LPVOID,
 		dwCreationFlags: DWORD,
 		lpThreadId: LPDWORD,
@@ -130,6 +130,7 @@ foreign kernel32 {
 	ResumeThread :: proc(thread: HANDLE) -> DWORD ---
 	GetThreadPriority :: proc(thread: HANDLE) -> c_int ---
 	SetThreadPriority :: proc(thread: HANDLE, priority: c_int) -> BOOL ---
+	SetThreadDescription :: proc(hThread: HANDLE, lpThreadDescription: PCWSTR) -> HRESULT ---
 	GetExitCodeThread :: proc(thread: HANDLE, exit_code: ^DWORD) -> BOOL ---
 	TerminateThread :: proc(thread: HANDLE, exit_code: DWORD) -> BOOL ---
 	SuspendThread :: proc(hThread: HANDLE) -> DWORD ---
@@ -291,6 +292,14 @@ foreign kernel32 {
 		hTemplateFile: HANDLE,
 	) -> HANDLE ---
 
+	GetFileTime :: proc(
+		hFile: HANDLE,
+		lpCreationTime: LPFILETIME,
+		lpLastAccessTime: LPFILETIME,
+		lpLastWriteTime: LPFILETIME,
+	) -> BOOL ---
+	CompareFileTime :: proc(lpFileTime1: LPFILETIME, lpFileTime2: LPFILETIME) -> LONG ---
+
 	FindFirstFileW :: proc(fileName: LPCWSTR, findFileData: LPWIN32_FIND_DATAW) -> HANDLE ---
 	FindNextFileW :: proc(findFile: HANDLE, findFileData: LPWIN32_FIND_DATAW) -> BOOL ---
 	FindClose :: proc(findFile: HANDLE) -> BOOL ---
@@ -354,6 +363,9 @@ foreign kernel32 {
 	LocalReAlloc :: proc(mem: LPVOID, bytes: SIZE_T, flags: UINT) -> LPVOID ---
 	LocalFree :: proc(mem: LPVOID) -> LPVOID ---
 
+	GlobalAlloc :: proc(flags: UINT, bytes: SIZE_T) -> LPVOID ---
+	GlobalReAlloc :: proc(mem: LPVOID, bytes: SIZE_T, flags: UINT) -> LPVOID ---
+	GlobalFree :: proc(mem: LPVOID) -> LPVOID ---
 
 	ReadDirectoryChangesW :: proc(
 		hDirectory: HANDLE,
@@ -422,7 +434,7 @@ foreign kernel32 {
 	GetConsoleWindow :: proc() -> HWND ---
 	GetConsoleScreenBufferInfo :: proc(hConsoleOutput: HANDLE, lpConsoleScreenBufferInfo: PCONSOLE_SCREEN_BUFFER_INFO) -> BOOL ---
 	SetConsoleScreenBufferSize :: proc(hConsoleOutput: HANDLE, dwSize: COORD) -> BOOL ---
-	SetConsoleWindowInfo :: proc(hConsoleOutput: HANDLE, bAbsolute : BOOL, lpConsoleWindow: ^SMALL_RECT) -> BOOL ---
+	SetConsoleWindowInfo :: proc(hConsoleOutput: HANDLE, bAbsolute: BOOL, lpConsoleWindow: ^SMALL_RECT) -> BOOL ---
 	GetConsoleCursorInfo :: proc(hConsoleOutput: HANDLE, lpConsoleCursorInfo: PCONSOLE_CURSOR_INFO) -> BOOL ---
 	SetConsoleCursorInfo :: proc(hConsoleOutput: HANDLE, lpConsoleCursorInfo: PCONSOLE_CURSOR_INFO) -> BOOL ---
 
@@ -570,7 +582,7 @@ MEM_TOP_DOWN    :: 0x100000
 MEM_LARGE_PAGES :: 0x20000000
 MEM_4MB_PAGES   :: 0x80000000
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	VirtualAlloc :: proc(
 		lpAddress: LPVOID,
@@ -713,7 +725,7 @@ LowMemoryResourceNotification  :: MEMORY_RESOURCE_NOTIFICATION_TYPE.LowMemoryRes
 HighMemoryResourceNotification :: MEMORY_RESOURCE_NOTIFICATION_TYPE.HighMemoryResourceNotification
 
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	CreateMemoryResourceNotification :: proc(
 		NotificationType: MEMORY_RESOURCE_NOTIFICATION_TYPE,
@@ -729,7 +741,7 @@ FILE_CACHE_MAX_HARD_DISABLE :: DWORD(0x00000002)
 FILE_CACHE_MIN_HARD_ENABLE  :: DWORD(0x00000004)
 FILE_CACHE_MIN_HARD_DISABLE :: DWORD(0x00000008)
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	GetSystemFileCacheSize :: proc(
 		lpMinimumFileCacheSize: PSIZE_T,
@@ -759,7 +771,7 @@ WIN32_MEMORY_RANGE_ENTRY :: struct {
 
 PWIN32_MEMORY_RANGE_ENTRY :: ^WIN32_MEMORY_RANGE_ENTRY
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	PrefetchVirtualMemory :: proc(
 		hProcess: HANDLE,
@@ -817,23 +829,23 @@ foreign kernel32 {
 
 MEHC_PATROL_SCRUBBER_PRESENT :: ULONG(0x1)
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	GetMemoryErrorHandlingCapabilities :: proc(
 		Capabilities: PULONG,
 	) -> BOOL ---
 }
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	GlobalMemoryStatusEx :: proc(
 		lpBuffer: ^MEMORYSTATUSEX,
 	) -> BOOL ---
 }
 
-PBAD_MEMORY_CALLBACK_ROUTINE :: #type proc "stdcall" ()
+PBAD_MEMORY_CALLBACK_ROUTINE :: #type proc "system" ()
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	RegisterBadMemoryNotification :: proc(
 		Callback: PBAD_MEMORY_CALLBACK_ROUTINE,
@@ -854,7 +866,7 @@ VmOfferPriorityLow         :: OFFER_PRIORITY.VmOfferPriorityLow
 VmOfferPriorityBelowNormal :: OFFER_PRIORITY.VmOfferPriorityBelowNormal
 VmOfferPriorityNormal      :: OFFER_PRIORITY.VmOfferPriorityNormal
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	OfferVirtualMemory :: proc(
 		VirtualAddress: PVOID,
@@ -919,7 +931,7 @@ WIN32_MEMORY_REGION_INFORMATION_u_s_Bitfield :: distinct ULONG
 	Reserved       : 32-6,
 }*/
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign one_core {
 	QueryVirtualMemoryInformation :: proc(
 		Process: HANDLE,
@@ -944,7 +956,7 @@ foreign one_core {
 
 NUMA_NO_PREFERRED_NODE :: 0xffffffff
 
-MapViewOfFile2 :: #force_inline proc "stdcall" (
+MapViewOfFile2 :: #force_inline proc "system" (
 	FileMappingHandle: HANDLE,
 	ProcessHandle: HANDLE,
 	Offset: ULONG64,
@@ -965,7 +977,7 @@ MapViewOfFile2 :: #force_inline proc "stdcall" (
 	)
 }
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	UnmapViewOfFile2 :: proc(
 		ProcessHandle: HANDLE,
@@ -974,7 +986,7 @@ foreign kernel32 {
 	) -> BOOL ---
 }
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	GetProductInfo :: proc(
 		OSMajorVersion: DWORD,
@@ -985,7 +997,7 @@ foreign kernel32 {
 	) -> BOOL ---
 }
 
-HandlerRoutine :: proc "stdcall" (dwCtrlType: DWORD) -> BOOL
+HandlerRoutine :: proc "system" (dwCtrlType: DWORD) -> BOOL
 PHANDLER_ROUTINE :: HandlerRoutine
 
 
@@ -1126,16 +1138,16 @@ DCB :: struct {
 	wReserved1: WORD,
 }
 
-@(default_calling_convention="stdcall")
+@(default_calling_convention="system")
 foreign kernel32 {
 	GetCommState :: proc(handle: HANDLE, dcb: ^DCB) -> BOOL ---
 	SetCommState :: proc(handle: HANDLE, dcb: ^DCB) -> BOOL ---
 }
 
 
-LPFIBER_START_ROUTINE :: #type proc "stdcall" (lpFiberParameter: LPVOID)
+LPFIBER_START_ROUTINE :: #type proc "system" (lpFiberParameter: LPVOID)
 
-@(default_calling_convention = "stdcall")
+@(default_calling_convention = "system")
 foreign kernel32 {
 	CreateFiber :: proc(dwStackSize: SIZE_T, lpStartAddress: LPFIBER_START_ROUTINE, lpParameter: LPVOID) -> LPVOID ---
 	DeleteFiber :: proc(lpFiber: LPVOID) ---
@@ -1188,3 +1200,22 @@ SYSTEM_LOGICAL_PROCESSOR_INFORMATION :: struct {
 	Relationship: LOGICAL_PROCESSOR_RELATIONSHIP,
 	DummyUnion: DUMMYUNIONNAME_u,
 }
+
+/* Global Memory Flags */
+GMEM_FIXED          :: 0x0000
+GMEM_MOVEABLE       :: 0x0002
+GMEM_NOCOMPACT      :: 0x0010
+GMEM_NODISCARD      :: 0x0020
+GMEM_ZEROINIT       :: 0x0040
+GMEM_MODIFY         :: 0x0080
+GMEM_DISCARDABLE    :: 0x0100
+GMEM_NOT_BANKED     :: 0x1000
+GMEM_SHARE          :: 0x2000
+GMEM_DDESHARE       :: 0x2000
+GMEM_NOTIFY         :: 0x4000
+GMEM_LOWER          :: GMEM_NOT_BANKED
+GMEM_VALID_FLAGS    :: 0x7F72
+GMEM_INVALID_HANDLE :: 0x8000
+
+GHND                :: (GMEM_MOVEABLE | GMEM_ZEROINIT)
+GPTR                :: (GMEM_FIXED | GMEM_ZEROINIT)
